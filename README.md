@@ -118,7 +118,7 @@ Make the password in `backend/.env`'s `DATABASE_URL` match `POSTGRES_PASSWORD` i
 | `DATABASE_URL` | backend | PostgreSQL URL. `postgres://`, `postgresql://` are normalised to `postgresql+psycopg://` |
 | `CORS_ORIGINS` | backend | Comma-separated allowed origins, e.g. `http://localhost:3000,https://your-app.vercel.app` |
 | `LLM_PROVIDER` | backend | `ollama` (local, default) or `gemini` (hosted demo) |
-| `LLM_TIMEOUT_SECONDS`, `LLM_MAX_RETRIES` | backend | Per-request timeout (default 60 s); retries for transient failures only (default 1, max 2) |
+| `LLM_TIMEOUT_SECONDS`, `LLM_MAX_RETRIES` | backend | Per-request timeout, 1–300 s (default 60); retries for transient failures only (default 1, max 2) |
 | `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | backend | Local Ollama server and model (default `llama3.2:3b`) |
 | `GEMINI_API_KEY`, `GEMINI_MODEL` | backend | Gemini key (required only for `gemini`) and model (default `gemini-3.8-flash`) |
 | `LANGSMITH_TRACING` | process env | External tracing, opt-in; keep `false` |
@@ -221,7 +221,8 @@ uv run pytest               # without TEST_DATABASE_URL: unit tests only, DB tes
 docker compose exec db createdb -U commerceops commerceops_test     # once
 TEST_DATABASE_URL=postgresql://commerceops:<password>@localhost:5432/commerceops_test uv run pytest
 
-# Optional live model tests (skipped by default; the normal suite never calls a model):
+# Optional live provider smoke tests (skipped by default; the normal suite never calls a model).
+# They check provider integration and the structured-output contract, not model quality:
 RUN_OLLAMA_INTEGRATION=1 uv run pytest tests/integration -m llm_integration
 RUN_GEMINI_INTEGRATION=1 uv run pytest tests/integration -m llm_integration   # uses quota
 

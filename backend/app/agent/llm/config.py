@@ -48,8 +48,8 @@ class LLMConfig:
             raise LLMConfigurationError(f"A valid model name is required for provider '{name}'.")
 
         timeout = float(settings.llm_timeout_seconds)
-        if not 0 < timeout <= 300:
-            raise LLMConfigurationError("LLM_TIMEOUT_SECONDS must be between 0 and 300.")
+        if not 1 <= timeout <= 300:
+            raise LLMConfigurationError("LLM_TIMEOUT_SECONDS must be between 1 and 300.")
         retries = int(settings.llm_max_retries)
         if not 0 <= retries <= MAX_RETRIES_CAP:
             raise LLMConfigurationError(f"LLM_MAX_RETRIES must be between 0 and {MAX_RETRIES_CAP}.")

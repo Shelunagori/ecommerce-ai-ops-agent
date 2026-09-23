@@ -111,12 +111,30 @@ def test_invalid_configuration(overrides, fragment):
         ("llm_max_retries", 3),
         ("llm_max_retries", -1),
         ("llm_timeout_seconds", 0),
+        ("llm_timeout_seconds", 0.5),
+        ("llm_timeout_seconds", -1),
         ("llm_timeout_seconds", 301),
     ],
 )
 def test_timeout_and_retry_bounds(field, value):
     with pytest.raises(ValidationError):
         settings(**{field: value})
+
+
+@pytest.mark.parametrize("value", [1, 60, 300])
+def test_timeout_accepts_1_to_300_seconds(value):
+    p = get_llm_provider(settings(llm_timeout_seconds=value))
+    assert p._chat_model.client_kwargs["timeout"].read == value
+
+
+def test_default_timeout_is_60_seconds():
+    assert settings().llm_timeout_seconds == 60
+
+
+def test_config_boundary_rejects_sub_second_timeout_even_if_settings_are_bypassed():
+    s = settings().model_copy(update={"llm_timeout_seconds": 0.5})
+    with pytest.raises(LLMConfigurationError, match="between 1 and 300"):
+        LLMConfig.from_settings(s)
 
 
 def test_config_never_exposes_the_key():

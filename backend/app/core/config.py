@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # LLM provider layer (app/agent/llm). Provider-specific values are only read by the
     # provider factory. No network call happens until a model is actually invoked.
     llm_provider: Literal["ollama", "gemini"] = "ollama"
-    llm_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
+    llm_timeout_seconds: float = Field(default=60.0, ge=1, le=300)  # seconds
     llm_max_retries: int = Field(default=1, ge=0, le=2)  # transient failures only
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.2:3b"

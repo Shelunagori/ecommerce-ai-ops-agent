@@ -289,7 +289,7 @@ Model-specific parameters stay in the factory:
 **Configuration boundary.** `LLMConfig.from_settings()` rejects unknown providers
 (“Supported: ollama, gemini”), invalid model names, non-http(s) `OLLAMA_BASE_URL`, and
 `gemini` without a non-blank `GEMINI_API_KEY` — before any client is built. Messages never
-contain the key. `LLM_TIMEOUT_SECONDS` is 0–300 (default 60, generous for a cold local
+contain the key. `LLM_TIMEOUT_SECONDS` is 1–300 seconds (default 60, generous for a cold local
 model); `LLM_MAX_RETRIES` is 0–2 (default 1).
 
 **Structured output.** `with_structured_output(..., method="json_schema",
@@ -334,6 +334,13 @@ duration. Never keys, prompts or model responses.
 **Data.** The hosted demo uses Gemini with **synthetic demo data only**; no real customer,
 employer, client (e.g. Brandhub) or other confidential data may be sent to the (free) API.
 The hosted backend never needs Ollama; no model artifacts go into the Docker image.
+
+**Live tests.** `tests/integration/test_llm_live.py` (opt-in via `RUN_OLLAMA_INTEGRATION=1` /
+`RUN_GEMINI_INTEGRATION=1`) are provider *compatibility* smoke tests: the call succeeds,
+native structured output validates as `IntentAnalysis` (allowed intent, entity bounds,
+confidence 0–1), metadata is correct, and a missing Ollama model / rejected Gemini key
+surface as safe typed errors. They deliberately do not assert which intent a model picks;
+semantic quality belongs to the later evaluation framework.
 
 ### Why a provider abstraction?
 Local development runs free on Ollama; the hosted demo uses Gemini; the agent and tool
