@@ -3,7 +3,10 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.errors import register_error_handlers
 from app.api.health import router as health_router
+from app.api.middleware import RequestContextMiddleware
+from app.api.routes.commerce import router as commerce_router
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 
@@ -24,9 +27,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_credentials="*" not in origins,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["*"],
+        expose_headers=["X-Request-ID"],
     )
+    # Outermost: request id/logging wraps everything, including CORS and error handling.
+    app.add_middleware(RequestContextMiddleware)
+    register_error_handlers(app)
 
     app.include_router(health_router)
+    app.include_router(commerce_router)
 
     logger.info(
         "application configured",

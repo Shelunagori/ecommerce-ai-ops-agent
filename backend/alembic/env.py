@@ -1,4 +1,8 @@
-"""Alembic environment: URL comes from app settings, metadata from app.models."""
+"""Alembic environment: URL comes from app settings, metadata from app.models.
+
+Tests (and tooling) may pass an explicit URL via ``config.set_main_option("sqlalchemy.url")``;
+otherwise DATABASE_URL from application settings is used.
+"""
 
 from logging.config import fileConfig
 
@@ -7,17 +11,17 @@ from sqlalchemy import engine_from_config, pool
 
 from app.core.config import get_settings
 from app.db.url import normalize_database_url
-from app.models.base import Base
+from app.models import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
 
 def _database_url() -> str:
-    url = get_settings().database_url
+    url = config.get_main_option("sqlalchemy.url") or get_settings().database_url
     if not url:
         raise RuntimeError("DATABASE_URL is not set")
     return normalize_database_url(url)
