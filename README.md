@@ -7,7 +7,7 @@ invoices, shipments and company policies, with human approval for sensitive acti
 > **Data notice:** no real customer or company data is used. The project will use
 > synthetic ecommerce data only.
 
-## Status: Step 4 — LLM provider layer
+## Status: Step 5 — model-driven tool calling
 
 What exists today:
 
@@ -26,20 +26,24 @@ What exists today:
 - A provider-neutral **LLM layer** (`app/agent/llm`): Ollama for local development, Gemini
   for the hosted demo, native structured output validated against a Pydantic schema,
   explicit timeouts, a conservative retry policy and typed safe errors. It is exercised
-  only by a structured intent-classification test vehicle; **no tools are bound to the
-  model and there is no agent yet.**
+  by a structured intent-classification test vehicle and by the commerce assistant.
+- A **model-driven commerce assistant** (`app/agent/assistant`): the model receives the 12
+  tool schemas (`bind_tools`), requests tool calls, the host executes them through the
+  Step 3 tools with the trusted tenant context, and the model answers from the results.
+  The tool-calling loop is explicit and bounded (no LangGraph yet), single-turn, read-only.
 - Next.js page showing API/database status and per-tenant demo data counts
 - Backend tests, including real-PostgreSQL tests for constraints and cross-tenant isolation
 
-What does **not** exist yet: business actions/writes, tool-calling by a model, agents or
-LangGraph workflows, RAG,
+What does **not** exist yet: business actions/writes, LangGraph workflows, conversation
+memory or persistence, human approval, RAG/company policies,
 embeddings, vector search, approvals, evaluation or observability. Those are planned,
 not built.
 
 ## Planned capabilities
 
 Done: relational ecommerce data model, synthetic seed data, read-only business tools, LLM
-provider layer (Ollama / Gemini). Next, roughly in order: LangGraph agent → RAG over company policies with pgvector → human-in-the-loop approvals → agent
+provider layer (Ollama / Gemini), explicit model-driven tool calling. Next, roughly in
+order: LangGraph orchestration → RAG over company policies with pgvector → human-in-the-loop approvals → agent
 state/memory → evaluation → observability → production deployment.
 
 ## Architecture (current)
@@ -119,8 +123,9 @@ Make the password in `backend/.env`'s `DATABASE_URL` match `POSTGRES_PASSWORD` i
 | `CORS_ORIGINS` | backend | Comma-separated allowed origins, e.g. `http://localhost:3000,https://your-app.vercel.app` |
 | `LLM_PROVIDER` | backend | `ollama` (local, default) or `gemini` (hosted demo) |
 | `LLM_TIMEOUT_SECONDS`, `LLM_MAX_RETRIES` | backend | Per-request timeout, 1–300 s (default 60); retries for transient failures only (default 1, max 2) |
-| `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | backend | Local Ollama server and model (default `llama3.2:3b`) |
+| `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | backend | Local Ollama server and model (default `qwen3:4b-instruct`, the non-thinking Qwen3-4B-Instruct-2507; any other Ollama model, e.g. `llama3.2:3b`, is selectable) |
 | `GEMINI_API_KEY`, `GEMINI_MODEL` | backend | Gemini key (required only for `gemini`) and model (default `gemini-3.8-flash`) |
+| `ASSISTANT_MAX_MODEL_ROUNDS`, `ASSISTANT_MAX_TOOL_CALLS`, `ASSISTANT_MAX_TOOL_CALLS_PER_TURN` | backend | Assistant loop bounds (defaults 5 / 8 / 4; hard maxima 10 / 20 / 8) |
 | `LANGSMITH_TRACING` | process env | External tracing, opt-in; keep `false` |
 | `NEXT_PUBLIC_API_URL` | frontend | Backend base URL (inlined at build time) |
 
@@ -183,7 +188,7 @@ External tracing (LangSmith) is opt-in and off by default (`LANGSMITH_TRACING=fa
 Local, free — [Ollama](https://ollama.com):
 
 ```bash
-ollama pull llama3.2:3b     # ~2 GB, once
+ollama pull qwen3:4b-instruct   # ~2.5 GB, once (or: ollama pull llama3.2:3b + OLLAMA_MODEL=llama3.2:3b)
 ollama serve                # if the Ollama app is not already running
 uv run python -m scripts.run_llm --provider ollama --text "Show me order ORD-1001"
 ```
@@ -200,6 +205,21 @@ uv run python -m scripts.run_llm --provider gemini --text "Where is shipment SHP
 
 stdout is the validated result JSON; one safe log line goes to stderr. Keys, prompts and
 raw model responses are never printed or logged.
+
+### Commerce assistant (model + tools, single turn)
+
+```bash
+uv run python -m scripts.run_assistant --tenant $NORTHSTAR --provider ollama \
+  --text "Show me order ORD-1001"
+uv run python -m scripts.run_assistant --tenant $BLUEPEAK --provider gemini \
+  --text "What is the latest unpaid invoice for CUS-1002?"
+```
+
+stdout is JSON: answer, provider/model, prompt version, model-call count, tool-call summary
+(tool, business arguments, outcome, duration) and total duration. `--tenant` is trusted
+runtime context and is validated before any model is built; it never reaches the prompt.
+Ask about policies (refunds, compensation) and it will say that knowledge is not available
+yet — there is no RAG.
 
 ## 4. Frontend
 

@@ -1,14 +1,16 @@
 # Architecture notes
 
-Current step: **Step 4 — LLM provider layer.** Models can be called (Ollama / Gemini) for
-validated structured output, but no tools are bound to a model, and there is no agent,
-LangGraph workflow, RAG or embeddings yet.
+Current step: **Step 5 — model-driven tool calling.** A single-turn commerce assistant binds
+the 12 read-only tools to the model and runs an explicit, bounded tool-calling loop. There
+is no LangGraph workflow, conversation memory, persistence, human approval, RAG or
+embeddings yet.
 
 | Concern | Where it lives |
 | --- | --- |
 | Structured business data | PostgreSQL (7 tables, Alembic migration `0001`) |
 | Access to that data | `app/services` tenant-scoped query classes (read-only) |
-| Agent-facing capabilities | `app/agent/tools` — 12 typed, read-only LangChain tools (not bound to a model yet) |
+| Agent-facing capabilities | `app/agent/tools` — 12 typed, read-only LangChain tools, bound to the model by the assistant |
+| Tool-calling loop | `app/agent/assistant` — explicit, bounded, sequential (no LangGraph yet) |
 | Language models | `app/agent/llm` — provider-neutral layer over Ollama (local) and Gemini (hosted) |
 | AI / RAG / embeddings | Not implemented yet (pgvector image present, extension not enabled) |
 
@@ -44,9 +46,16 @@ LangGraph workflow, RAG or embeddings yet.
 | `app/agent/llm/errors.py` | `LLMConfigurationError`/`LLMAuthenticationError`, `LLMUnavailableError`, `LLMTimeoutError`, `LLMOutputError`, `LLMInputError`, `LLMInternalError` |
 | `app/agent/llm/intent.py` | `IntentAnalysis` schema + `analyze_intent()` (structured-output test vehicle) |
 | `app/agent/prompts/intent.py` | Versioned prompt (`intent-v1`), separate from provider code |
+| `app/agent/prompts/assistant.py` | Versioned assistant system prompt (`commerce-assistant-v1`) |
+| `app/agent/assistant/assistant.py` | `CommerceAssistant.run(text, context)` — the tool-calling loop |
+| `app/agent/assistant/executor.py` | `ToolExecutor` — registry allowlist, argument checks, trusted runtime injection |
+| `app/agent/assistant/limits.py` | `AssistantLimits` (rounds / total calls / calls per turn) from settings |
+| `app/agent/assistant/result.py` | `AssistantResult`, `ToolCallSummary`, `InvalidToolCallSummary` |
+| `app/agent/assistant/errors.py` | `AssistantError` (`agent_*` codes; LLM failures keep their `llm_*` code) |
 | `scripts/seed_demo.py` | Idempotent synthetic seed |
 | `scripts/run_tool.py` | Developer-only CLI to run one registered tool without a model |
 | `scripts/run_llm.py` | Developer-only CLI to run the structured intent analysis against a provider |
+| `scripts/run_assistant.py` | Developer-only CLI to run the commerce assistant for one tenant |
 
 ## Domain model
 
@@ -279,9 +288,9 @@ Model-specific parameters stay in the factory:
 
 | | Ollama | Gemini |
 | --- | --- | --- |
-| Default model | `llama3.2:3b` | `gemini-3.8-flash` |
+| Default model | `qwen3:4b-instruct` (Qwen3-4B-Instruct-2507, non-thinking; any Ollama model selectable via `OLLAMA_MODEL`, e.g. `llama3.2:3b`) | `gemini-3.8-flash` |
 | Sampling | `temperature=0`, `num_predict=512` | model defaults (Gemini 3 guidance: don't override temperature) |
-| Thinking | — | `thinking_level="low"` for `gemini-3*` models only (lowest level 3.8 Flash supports); omitted otherwise |
+| Thinking | nothing forced (no `think` in requests): the default is a non-thinking model; `think` may be rejected by models without thinking support and cannot make a thinking-only model (e.g. `qwen3:4b` = `qwen3:4b-thinking`) non-thinking — pick a non-thinking model instead. Reasoning text is never stripped from answers as a workaround | `thinking_level="low"` for `gemini-3*` models only (lowest level 3.8 Flash supports); omitted otherwise |
 | Timeout | `httpx.Timeout(LLM_TIMEOUT_SECONDS)` | `timeout=LLM_TIMEOUT_SECONDS` |
 | Library retries | none | `max_retries=1` (= single attempt in the Google SDK; `0` would mean "SDK default") |
 | Construction | `validate_model_on_init=False` — no network | key passed explicitly — no network, no implicit env lookup |
@@ -352,6 +361,98 @@ be distinguished from tool/data failures when the agent is introduced.
 
 ### Why structured output?
 Downstream code needs validated, machine-readable decisions rather than parsing free text.
+
+## Model-Driven Tool Calling
+
+```text
+User
+ ↓
+LLM (tools bound: exactly build_commerce_tools())
+ ↓ AIMessage.tool_calls  (business arguments only)
+ToolExecutor  — registry allowlist, argument checks, trusted AgentContext → ToolRuntime
+ ↓
+Typed Step 3 tool  (schema validation, envelope, per-tool log)
+ ↓
+Tenant-scoped service
+ ↓
+PostgreSQL
+ ↑
+ToolMessage (same tool_call_id, {ok, data|error} envelope)
+ ↑
+LLM
+ ↓
+Final answer  → AssistantResult
+```
+
+**Provider interface.** `LLMProvider.invoke_chat(messages, tools=..., operation=,
+prompt_version=)` binds the tools (`bind_tools`) inside `ChatModelProvider` and returns the
+provider's `AIMessage` unchanged, using the same Step 4 retry/classification/logging. The
+assistant never branches on provider.
+
+**Loop algorithm** (`CommerceAssistant.run`, a plain `for` loop — no recursion):
+
+1. Validate the trusted `AgentContext` and the input (1–4,000 chars). Messages start as
+   `[system(commerce-assistant-v1), user]`. The tenant is never put into messages.
+2. For each round (≤ `max_model_rounds`): call the model with the registry bound.
+3. `AIMessage.invalid_tool_calls` (unparseable model output) → record a sanitised summary,
+   execute nothing, fabricate no ToolMessage, stop with `agent_protocol_error`.
+4. No tool calls → the answer is `AIMessage.text` (text blocks only — reasoning/thinking
+   blocks are never returned); empty → `agent_empty_answer`. Text that is a tool-protocol
+   artifact — a bare `{}` / `[]`, a standalone JSON pseudo call (`name` plus
+   `parameters`/`arguments`/`args`, optionally fenced or in a list), or
+   `<tool_call>`/`<function_call>` markup — is **not** an answer and is **never parsed for
+   execution**: it is recorded (`textual_tool_call` / `empty_structured_output`, with the
+   attempted name) and the run ends with `agent_protocol_error`. Tools run only from
+   LangChain's parsed `AIMessage.tool_calls`; ordinary JSON-looking text is left alone.
+5. Any call without an id, or with a repeated id → `agent_protocol_error`.
+6. Budgets are checked for the **whole batch** before anything runs: more than
+   `max_tool_calls_per_turn`, or exceeding the remaining `max_tool_calls`, or requesting
+   tools in the last allowed round → `agent_limit_exceeded`; no partial batch.
+7. Append the **original** `AIMessage` object once (provider metadata such as Gemini 3
+   thought signatures must survive), execute every call of the batch **sequentially**,
+   append the ToolMessages in call order, and only then call the model again.
+
+**Limits** (trusted settings only): `ASSISTANT_MAX_MODEL_ROUNDS=5` (≤ 10),
+`ASSISTANT_MAX_TOOL_CALLS=8` (≤ 20), `ASSISTANT_MAX_TOOL_CALLS_PER_TURN=4` (≤ 8).
+
+**Executor rules.** Lookup is an exact-name dict built from the registry — no imports,
+`getattr` or reflection on model output. Unknown tool → `unknown_tool` ToolMessage, nothing
+runs. Non-object arguments or a model-supplied `runtime` → `invalid_arguments`. Everything
+else goes through the real tool (`tool.invoke(ToolCall)` with `make_runtime(context)`
+injected), so schema validation (`extra="forbid"`, bounds) produces the standard
+`invalid_arguments` ToolMessage with the original `tool_call_id`; a returned ToolMessage
+whose id does not match is a host protocol error.
+
+**Results.** `AssistantResult`: answer, provider, model, prompt version, model-call count,
+`ToolCallSummary` list (round, tool, schema-declared business arguments only — truncated,
+names of rejected arguments such as a smuggled `tenant_id`, outcome, error code, duration)
+and duration. No reasoning, raw tool payloads, tenant ids or secrets. `AssistantError`
+carries the same partial metadata for evaluation.
+
+**Retries.** Step 4 retries apply to each model invocation independently. The host never
+re-runs a tool: `order_not_found` or `invalid_arguments` is a business outcome fed back to
+the model. Repeated identical calls requested by the model execute again and count toward
+the limits (no silent deduplication).
+
+**Sequential, not parallel.** Step 5 proves protocol correctness; parallel tool execution
+can come later if measurements justify it.
+
+**Logging.** One `app.agent.assistant` line per run: provider, model, prompt version,
+tenant/request id (trusted server log), model calls, tool-call count, tool names, invalid
+calls, outcome, duration. Never the user message, prompts, model output or tool payloads.
+Step 3 per-tool log lines remain.
+
+### Why a manual loop before LangGraph?
+It separates (1) model/tool protocol correctness from (2) workflow orchestration and state
+management, so failures are easier to locate.
+
+### What LangGraph will add (Step 6)
+Explicit graph state, controlled transitions and, later, durable checkpoints. Nothing in
+Step 5 persists state or remembers earlier conversations; there is no human approval.
+
+### Still missing
+RAG / company policies, persistent conversation state, human approval, write tools,
+evaluation framework, full observability.
 
 ## Open items
 
