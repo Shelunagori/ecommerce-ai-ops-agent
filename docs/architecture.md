@@ -1,13 +1,15 @@
 # Architecture notes
 
-Current step: **Step 3 — deterministic read-only agent tools.** No LLM, agent, LangGraph
-workflow, RAG or embeddings yet.
+Current step: **Step 4 — LLM provider layer.** Models can be called (Ollama / Gemini) for
+validated structured output, but no tools are bound to a model, and there is no agent,
+LangGraph workflow, RAG or embeddings yet.
 
 | Concern | Where it lives |
 | --- | --- |
 | Structured business data | PostgreSQL (7 tables, Alembic migration `0001`) |
 | Access to that data | `app/services` tenant-scoped query classes (read-only) |
-| Agent-facing capabilities | `app/agent/tools` — 12 typed, read-only LangChain tools (no model yet) |
+| Agent-facing capabilities | `app/agent/tools` — 12 typed, read-only LangChain tools (not bound to a model yet) |
+| Language models | `app/agent/llm` — provider-neutral layer over Ollama (local) and Gemini (hosted) |
 | AI / RAG / embeddings | Not implemented yet (pgvector image present, extension not enabled) |
 
 ## Backend layout (`backend/`)
@@ -35,8 +37,16 @@ workflow, RAG or embeddings yet.
 | `app/agent/tools/envelope.py` | `{"ok", "data" \| "error"}` result envelope |
 | `app/agent/tools/registry.py` | `build_commerce_tools()` — the explicit list of permitted tools |
 | `app/agent/tools/invoke.py` | Direct invocation with a trusted context (CLI/tests) |
+| `app/agent/llm/config.py` | `LLMConfig.from_settings()` — the configuration boundary (provider, model, key, timeout, retries) |
+| `app/agent/llm/factory.py` | `get_llm_provider()` — the only place that knows Ollama vs Gemini |
+| `app/agent/llm/provider.py` | `LLMProvider` protocol, `ChatModelProvider`, `RetryPolicy`, logging |
+| `app/agent/llm/classify.py` | Provider/transport exceptions → typed `LLMError`s |
+| `app/agent/llm/errors.py` | `LLMConfigurationError`/`LLMAuthenticationError`, `LLMUnavailableError`, `LLMTimeoutError`, `LLMOutputError`, `LLMInputError`, `LLMInternalError` |
+| `app/agent/llm/intent.py` | `IntentAnalysis` schema + `analyze_intent()` (structured-output test vehicle) |
+| `app/agent/prompts/intent.py` | Versioned prompt (`intent-v1`), separate from provider code |
 | `scripts/seed_demo.py` | Idempotent synthetic seed |
 | `scripts/run_tool.py` | Developer-only CLI to run one registered tool without a model |
+| `scripts/run_llm.py` | Developer-only CLI to run the structured intent analysis against a provider |
 
 ## Domain model
 
@@ -242,6 +252,99 @@ than retrieving text by similarity.
 Tool correctness (right data, right tenant, bounded, safe errors) and agent reasoning are
 separate concerns. Testing tools deterministically first means later agent failures can be
 attributed to reasoning, not to data access.
+
+## LLM Provider Layer
+
+```text
+                 LLMProvider (protocol)
+                 /           \
+             Ollama          Gemini
+         local, free       hosted demo
+      (langchain-ollama) (langchain-google-genai)
+                 \           /
+      ChatModelProvider: structured output, timeout, retry, safe errors, logging
+                     ↓
+           future agent orchestration (not built yet)
+```
+
+**Packages:** `langchain-ollama==1.1.0` (`ollama 0.6.2`), `langchain-google-genai==4.4.0`
+(`google-genai 2.25.0`, the consolidated Google GenAI SDK; plus `google-auth` and its
+crypto dependencies). Both are imported only inside `factory.py`/`classify.py`; a test
+enforces that no other module imports a provider SDK.
+
+**Interface.** Callers use `get_llm_provider(settings)` and the `LLMProvider` protocol
+(`info`, `invoke_structured(schema, messages, operation=, prompt_version=)`). One concrete
+`ChatModelProvider` wraps any LangChain chat model — there is no provider class hierarchy.
+Model-specific parameters stay in the factory:
+
+| | Ollama | Gemini |
+| --- | --- | --- |
+| Default model | `llama3.2:3b` | `gemini-3.8-flash` |
+| Sampling | `temperature=0`, `num_predict=512` | model defaults (Gemini 3 guidance: don't override temperature) |
+| Thinking | — | `thinking_level="low"` for `gemini-3*` models only (lowest level 3.8 Flash supports); omitted otherwise |
+| Timeout | `httpx.Timeout(LLM_TIMEOUT_SECONDS)` | `timeout=LLM_TIMEOUT_SECONDS` |
+| Library retries | none | `max_retries=1` (= single attempt in the Google SDK; `0` would mean "SDK default") |
+| Construction | `validate_model_on_init=False` — no network | key passed explicitly — no network, no implicit env lookup |
+
+**Configuration boundary.** `LLMConfig.from_settings()` rejects unknown providers
+(“Supported: ollama, gemini”), invalid model names, non-http(s) `OLLAMA_BASE_URL`, and
+`gemini` without a non-blank `GEMINI_API_KEY` — before any client is built. Messages never
+contain the key. `LLM_TIMEOUT_SECONDS` is 0–300 (default 60, generous for a cold local
+model); `LLM_MAX_RETRIES` is 0–2 (default 1).
+
+**Structured output.** `with_structured_output(..., method="json_schema",
+include_raw=True)` — native JSON-schema output on both providers. The schema sent to the
+provider is the Pydantic schema without keywords outside the portable subset
+(`minLength`/`maxLength`/`pattern`, which Gemini does not document). Every response is
+then re-validated locally against the full `IntentAnalysis` model (`extra="forbid"`,
+intent enum, ≤ 10 entities of 1–64 chars, confidence 0–1). A parse failure, empty
+response or schema violation is `llm_output_invalid`.
+
+`IntentAnalysis` is a **test vehicle** proving validated structured output — not the future
+router. Input is 1–2,000 characters and wrapped in `<message>` tags; the prompt tells the
+model to treat it as data.
+
+**Errors** (`code`, safe `message`; raw provider text never propagated, exception chains
+suppressed):
+
+| Error | Codes | Retried |
+| --- | --- | --- |
+| `LLMConfigurationError` | `llm_not_configured`, `llm_model_not_found` (e.g. Ollama model not pulled → hint `ollama pull <model>`) | no |
+| `LLMAuthenticationError` | `llm_auth_failed` (401/403) | no |
+| `LLMUnavailableError` | `llm_unavailable` (connection, 5xx), `llm_rate_limited` (429) | yes |
+| `LLMTimeoutError` | `llm_timeout` | yes |
+| `LLMOutputError` | `llm_output_invalid` | no |
+| `LLMInputError` | `llm_input_invalid` | no (never sent) |
+| `LLMInternalError` | `llm_internal_error`, `llm_request_rejected` | no |
+
+Classification uses LangChain's provider-neutral `ModelError` hierarchy first (the Gemini
+integration raises it), then SDK status codes (`ollama.ResponseError`,
+`google.genai.errors.APIError`), then transport errors.
+
+**Retry policy.** Only `llm_timeout` / `llm_unavailable` / `llm_rate_limited`, at most
+`LLM_MAX_RETRIES` (default 1), exponential backoff 0.5 s → 1 s (± 20 % jitter, cap 4 s).
+Configuration, authentication, model-not-found, invalid-request and invalid-output errors
+are never retried. Retrying is safe here because the call has no side effects; once
+tools are bound, retries must stay at the model-call level and never re-run actions.
+
+**Logging.** One `app.agent.llm` line per attempt outcome: provider, model, operation,
+prompt version, outcome (`ok`/`retrying`/`error`), error code/type, attempts, input length,
+duration. Never keys, prompts or model responses.
+
+**Data.** The hosted demo uses Gemini with **synthetic demo data only**; no real customer,
+employer, client (e.g. Brandhub) or other confidential data may be sent to the (free) API.
+The hosted backend never needs Ollama; no model artifacts go into the Docker image.
+
+### Why a provider abstraction?
+Local development runs free on Ollama; the hosted demo uses Gemini; the agent and tool
+layers stay provider-neutral, so switching is a configuration change.
+
+### Why are tools not bound yet?
+The model layer is validated on its own, so model failures (timeouts, invalid output) can
+be distinguished from tool/data failures when the agent is introduced.
+
+### Why structured output?
+Downstream code needs validated, machine-readable decisions rather than parsing free text.
 
 ## Open items
 

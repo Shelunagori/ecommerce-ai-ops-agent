@@ -7,7 +7,7 @@ invoices, shipments and company policies, with human approval for sensitive acti
 > **Data notice:** no real customer or company data is used. The project will use
 > synthetic ecommerce data only.
 
-## Status: Step 3 — deterministic agent tools
+## Status: Step 4 — LLM provider layer
 
 What exists today:
 
@@ -23,19 +23,23 @@ What exists today:
   the query layer, with typed bounded inputs, a stable JSON envelope and tenant context
   injected at runtime (never a model argument) — plus a developer CLI to run them. No model
   calls them yet.
+- A provider-neutral **LLM layer** (`app/agent/llm`): Ollama for local development, Gemini
+  for the hosted demo, native structured output validated against a Pydantic schema,
+  explicit timeouts, a conservative retry policy and typed safe errors. It is exercised
+  only by a structured intent-classification test vehicle; **no tools are bound to the
+  model and there is no agent yet.**
 - Next.js page showing API/database status and per-tenant demo data counts
 - Backend tests, including real-PostgreSQL tests for constraints and cross-tenant isolation
 
-What does **not** exist yet: business actions/writes, LLM integration, agents or LangGraph
-workflows, RAG,
+What does **not** exist yet: business actions/writes, tool-calling by a model, agents or
+LangGraph workflows, RAG,
 embeddings, vector search, approvals, evaluation or observability. Those are planned,
 not built.
 
 ## Planned capabilities
 
-Done: relational ecommerce data model, synthetic seed data, read-only business tools.
-Next, roughly in order: LLM provider abstraction (Ollama locally, Gemini for the hosted demo) → LangGraph
-agent → RAG over company policies with pgvector → human-in-the-loop approvals → agent
+Done: relational ecommerce data model, synthetic seed data, read-only business tools, LLM
+provider layer (Ollama / Gemini). Next, roughly in order: LangGraph agent → RAG over company policies with pgvector → human-in-the-loop approvals → agent
 state/memory → evaluation → observability → production deployment.
 
 ## Architecture (current)
@@ -113,7 +117,11 @@ Make the password in `backend/.env`'s `DATABASE_URL` match `POSTGRES_PASSWORD` i
 | `DEBUG` | backend | Verbose logging when `true` |
 | `DATABASE_URL` | backend | PostgreSQL URL. `postgres://`, `postgresql://` are normalised to `postgresql+psycopg://` |
 | `CORS_ORIGINS` | backend | Comma-separated allowed origins, e.g. `http://localhost:3000,https://your-app.vercel.app` |
-| `LLM_PROVIDER`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `GEMINI_API_KEY`, `GEMINI_MODEL` | backend | Reserved for later steps; unused today |
+| `LLM_PROVIDER` | backend | `ollama` (local, default) or `gemini` (hosted demo) |
+| `LLM_TIMEOUT_SECONDS`, `LLM_MAX_RETRIES` | backend | Per-request timeout (default 60 s); retries for transient failures only (default 1, max 2) |
+| `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | backend | Local Ollama server and model (default `llama3.2:3b`) |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | backend | Gemini key (required only for `gemini`) and model (default `gemini-3.8-flash`) |
+| `LANGSMITH_TRACING` | process env | External tracing, opt-in; keep `false` |
 | `NEXT_PUBLIC_API_URL` | frontend | Backend base URL (inlined at build time) |
 
 ## 2. Database (Docker)
@@ -170,6 +178,29 @@ The tenant comes from `--tenant` (trusted runtime context), never from `--args`.
 Developer tooling only — not an HTTP endpoint.
 External tracing (LangSmith) is opt-in and off by default (`LANGSMITH_TRACING=false`).
 
+### LLM provider (no tools, no agent yet)
+
+Local, free — [Ollama](https://ollama.com):
+
+```bash
+ollama pull llama3.2:3b     # ~2 GB, once
+ollama serve                # if the Ollama app is not already running
+uv run python -m scripts.run_llm --provider ollama --text "Show me order ORD-1001"
+```
+
+Hosted demo — Gemini (set `GEMINI_API_KEY` in `backend/.env`, never commit it):
+
+```bash
+uv run python -m scripts.run_llm --provider gemini --text "Where is shipment SHP-1003?"
+```
+
+> **Gemini: synthetic/demo data only.** The free Gemini API tier may use submitted content
+> to improve Google's products. Never send real customer, employer, client (e.g.
+> Brandhub) or other confidential data — only the synthetic CommerceOps demo data.
+
+stdout is the validated result JSON; one safe log line goes to stderr. Keys, prompts and
+raw model responses are never printed or logged.
+
 ## 4. Frontend
 
 ```bash
@@ -189,6 +220,10 @@ uv run pytest               # without TEST_DATABASE_URL: unit tests only, DB tes
 # the suite runs `alembic downgrade base`, so it refuses any other database name.
 docker compose exec db createdb -U commerceops commerceops_test     # once
 TEST_DATABASE_URL=postgresql://commerceops:<password>@localhost:5432/commerceops_test uv run pytest
+
+# Optional live model tests (skipped by default; the normal suite never calls a model):
+RUN_OLLAMA_INTEGRATION=1 uv run pytest tests/integration -m llm_integration
+RUN_GEMINI_INTEGRATION=1 uv run pytest tests/integration -m llm_integration   # uses quota
 
 cd ../frontend
 npm run lint && npm run typecheck && npm run build
@@ -215,7 +250,9 @@ These are the intended targets; nothing is deployed yet.
   (port 5432) connection; the *transaction pooler* (6543) needs prepared statements
   disabled, which will be handled when it is needed.
 - **Railway (backend):** deploy `backend/` using its Dockerfile; set `APP_ENV=production`,
-  `DATABASE_URL`, `CORS_ORIGINS` (your Vercel domain). Railway provides `PORT`.
+  `DATABASE_URL`, `CORS_ORIGINS` (your Vercel domain), `LLM_PROVIDER=gemini`,
+  `GEMINI_API_KEY` (as a Railway secret) and `LANGSMITH_TRACING=false`. Railway provides
+  `PORT`. The hosted backend never needs Ollama; no model files are baked into the image.
 - **Vercel (frontend):** import the repo with root directory `frontend/`, set
   `NEXT_PUBLIC_API_URL` to the Railway URL, then add the Vercel domain to the backend's
   `CORS_ORIGINS`.

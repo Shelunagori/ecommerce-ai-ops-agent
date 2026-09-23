@@ -13,6 +13,8 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "alembic>=1.13",
     "langchain==1.4.2",
+    "langchain-ollama==1.1.0",
+    "langchain-google-genai==4.4.0",
 ]
 
 [dependency-groups]
@@ -31,6 +33,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
     "integration: needs a real PostgreSQL (set TEST_DATABASE_URL)",
+    "llm_integration: live model calls; opt-in via RUN_OLLAMA_INTEGRATION / RUN_GEMINI_INTEGRATION",
 ]
 
 [tool.ruff]

@@ -24,12 +24,15 @@ class Settings(BaseSettings):
     # Comma-separated in the environment: "http://localhost:3000,https://x.vercel.app"
     cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
-    # Reserved for later steps; not used by any code yet.
+    # LLM provider layer (app/agent/llm). Provider-specific values are only read by the
+    # provider factory. No network call happens until a model is actually invoked.
     llm_provider: Literal["ollama", "gemini"] = "ollama"
+    llm_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
+    llm_max_retries: int = Field(default=1, ge=0, le=2)  # transient failures only
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "llama3.1"
+    ollama_model: str = "llama3.2:3b"
     gemini_api_key: SecretStr | None = None
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.8-flash"
 
     @field_validator("cors_origins", mode="before")
     @classmethod
