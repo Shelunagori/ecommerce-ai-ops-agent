@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-3.8-flash"
 
+    # Commerce assistant loop bounds (trusted configuration only; never model input).
+    assistant_max_model_rounds: int = Field(default=5, ge=1, le=10)
+    assistant_max_tool_calls: int = Field(default=8, ge=1, le=20)
+    assistant_max_tool_calls_per_turn: int = Field(default=4, ge=1, le=8)
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:

@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from typing import Any, Generic, Protocol, TypeVar
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.tools import BaseTool
 from pydantic import BaseModel, ValidationError
 
 from app.agent.llm.classify import classify_exception
@@ -37,8 +38,16 @@ class StructuredResult(Generic[T]):
     duration_ms: float
 
 
+@dataclass(frozen=True)
+class ChatResult:
+    message: AIMessage
+    attempts: int
+    duration_ms: float
+
+
 class LLMProvider(Protocol):
-    """What CommerceOps needs from a model today: validated structured output."""
+    """What CommerceOps needs from a model: validated structured output and tool-calling
+    chat turns. Provider specifics stay behind this interface."""
 
     @property
     def info(self) -> ProviderInfo: ...
@@ -51,6 +60,15 @@ class LLMProvider(Protocol):
         operation: str,
         prompt_version: str | None = None,
     ) -> StructuredResult[T]: ...
+
+    def invoke_chat(
+        self,
+        messages: Sequence[BaseMessage],
+        *,
+        tools: Sequence[BaseTool],
+        operation: str,
+        prompt_version: str | None = None,
+    ) -> ChatResult: ...
 
 
 @dataclass(frozen=True)
@@ -111,13 +129,40 @@ class ChatModelProvider:
         operation: str,
         prompt_version: str | None = None,
     ) -> StructuredResult[T]:
+        value, attempts, duration = self._with_retry(
+            lambda: self._attempt(schema, messages), messages, operation, prompt_version
+        )
+        return StructuredResult(value=value, attempts=attempts, duration_ms=duration)
+
+    def invoke_chat(
+        self,
+        messages: Sequence[BaseMessage],
+        *,
+        tools: Sequence[BaseTool],
+        operation: str,
+        prompt_version: str | None = None,
+    ) -> ChatResult:
+        """One chat turn with ``tools`` bound. Returns the provider's AIMessage unchanged
+        (tool calls and provider metadata such as Gemini thought signatures included)."""
+        value, attempts, duration = self._with_retry(
+            lambda: self._chat_attempt(messages, tools), messages, operation, prompt_version
+        )
+        return ChatResult(message=value, attempts=attempts, duration_ms=duration)
+
+    def _with_retry(
+        self,
+        attempt_fn: Callable[[], Any],
+        messages: Sequence[BaseMessage],
+        operation: str,
+        prompt_version: str | None,
+    ) -> tuple[Any, int, float]:
         started = time.perf_counter()
         input_chars = sum(len(str(m.content)) for m in messages)
         attempt = 0
         while True:
             attempt += 1
             try:
-                value = self._attempt(schema, messages)
+                value = attempt_fn()
             except Exception as exc:  # noqa: BLE001 - classified below, never re-raised raw
                 err = classify_exception(exc, provider=self._info.provider, model=self._info.model)
                 if err.retryable and attempt <= self._retry.max_retries:
@@ -130,7 +175,16 @@ class ChatModelProvider:
                 raise err from None
             duration = round((time.perf_counter() - started) * 1000, 1)
             self._log(operation, prompt_version, "ok", None, attempt, started, input_chars)
-            return StructuredResult(value=value, attempts=attempt, duration_ms=duration)
+            return value, attempt, duration
+
+    def _chat_attempt(
+        self, messages: Sequence[BaseMessage], tools: Sequence[BaseTool]
+    ) -> AIMessage:
+        runnable = self._chat_model.bind_tools(list(tools)) if tools else self._chat_model
+        out = runnable.invoke(list(messages))
+        if not isinstance(out, AIMessage):
+            raise LLMOutputError(error_type="unexpected_message_type")
+        return out
 
     def _attempt(self, schema: type[T], messages: Sequence[BaseMessage]) -> T:
         runnable = self._chat_model.with_structured_output(

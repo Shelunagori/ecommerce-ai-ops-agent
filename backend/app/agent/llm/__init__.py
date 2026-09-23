@@ -11,9 +11,10 @@ from app.agent.llm.errors import (
     LLMUnavailableError,
 )
 from app.agent.llm.factory import get_llm_provider
-from app.agent.llm.provider import LLMProvider, ProviderInfo, StructuredResult
+from app.agent.llm.provider import ChatResult, LLMProvider, ProviderInfo, StructuredResult
 
 __all__ = [
+    "ChatResult",
     "LLMAuthenticationError",
     "LLMConfigurationError",
     "LLMError",

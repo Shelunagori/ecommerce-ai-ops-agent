@@ -289,21 +289,70 @@ def test_tool_execution_cannot_mutate_the_database(deps, factory, ctx_a):
         assert s.scalar(select(func.count()).select_from(Customer)) == before
 
 
+class _RecordingSessionFactory:
+    """Wraps the real sessionmaker and keeps STRONG references to every Session it creates.
+
+    Holding references prevents CPython from reusing a freed object's id()/address, which
+    made an id()-based comparison flaky: a closed, garbage-collected session and the next
+    one could share an id even though they were different objects.
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.created = []
+
+    def __call__(self, **kwargs):
+        session = self.inner(**kwargs)
+        self.created.append(session)
+        return session
+
+
+def _assert_distinct(sessions):
+    for i, a in enumerate(sessions):
+        for b in sessions[i + 1 :]:
+            assert a is not b, "a Session object was shared between tool calls"
+
+
 def test_each_call_gets_its_own_session(factory, monkeypatch, ctx_a):
-    opened = []
+    """Production path: default ToolDependencies -> read_only_session -> session factory."""
+    recorder = _RecordingSessionFactory(factory)
+    monkeypatch.setattr(db_session_module, "_session_factory", lambda: recorder)
+    used = []
 
     @contextmanager
-    def tracking_scope():
-        with factory() as session:
-            opened.append(id(session))
+    def observing_scope():  # delegates to the REAL read_only_session
+        with db_session_module.read_only_session() as session:
+            used.append(session)
             yield session
 
     tools = {
-        t.name: t for t in build_commerce_tools(ToolDependencies(session_scope=tracking_scope))
+        t.name: t
+        for t in build_commerce_tools(
+            ToolDependencies(session_scope=observing_scope, clock=fixed_clock)
+        )
     }
     for _ in range(3):
-        call(tools, "get_order", ctx_a, order_number="ORD-1001")
-    assert len(opened) == 3 and len(set(opened)) == 3
+        assert call(tools, "get_order", ctx_a, order_number="ORD-1001")["ok"] is True
+
+    assert len(recorder.created) == 3
+    assert used == recorder.created  # each call ran on the session created for it
+    _assert_distinct(recorder.created)
+    for session in recorder.created:  # and each was finished (rolled back/closed) after use
+        assert not session.in_transaction()
+
+
+def test_concurrent_calls_never_share_a_session(factory, monkeypatch, ctx_a, ctx_b):
+    recorder = _RecordingSessionFactory(factory)
+    monkeypatch.setattr(db_session_module, "_session_factory", lambda: recorder)
+    tools = {t.name: t for t in build_commerce_tools()}  # production defaults
+    jobs = [ctx_a, ctx_b] * 8
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(
+            pool.map(lambda c: call(tools, "get_order", c, order_number="ORD-1001"), jobs)
+        )
+    assert all(r["ok"] for r in results)
+    assert len(recorder.created) == len(jobs)
+    _assert_distinct(recorder.created)
 
 
 def test_concurrent_calls_stay_isolated(tools, ctx_a, ctx_b):

@@ -20,6 +20,7 @@ class ErrorCode:
     INVALID_ARGUMENTS = "invalid_arguments"
     SERVICE_UNAVAILABLE = "service_unavailable"
     INTERNAL_ERROR = "internal_error"
+    UNKNOWN_TOOL = "unknown_tool"  # set by the assistant executor; the tool never runs
     # Not-found codes come from the service layer: customer_not_found, order_not_found, ...
 
 
