@@ -17,7 +17,7 @@ from tests.llm.conftest import FAKE_KEY, settings
 
 def test_ollama_provider(no_network):
     p = get_llm_provider(settings(llm_provider="ollama"))
-    assert (p.info.provider, p.info.model) == ("ollama", "llama3.2:3b")
+    assert (p.info.provider, p.info.model) == ("ollama", "qwen3:4b-instruct")
     chat = p._chat_model
     assert isinstance(chat, ChatOllama)
     assert chat.base_url == "http://localhost:11434" and chat.temperature == 0
@@ -44,6 +44,12 @@ def test_thinking_level_only_set_for_gemini_3_models():
         settings(llm_provider="gemini", gemini_api_key=FAKE_KEY), model="gemini-2.5-flash"
     )._chat_model
     assert chat.reasoning_effort is None and chat.thinking_budget is None
+
+
+@pytest.mark.parametrize("model", ["llama3.2:3b", "qwen3:4b", "qwen2.5:7b"])
+def test_other_ollama_models_can_still_be_selected_explicitly(model):
+    assert get_llm_provider(settings(ollama_model=model)).info.model == model
+    assert get_llm_provider(settings(), model=model).info.model == model
 
 
 def test_overrides_and_timeouts_flow_from_settings():

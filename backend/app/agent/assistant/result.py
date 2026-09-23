@@ -39,7 +39,13 @@ class InvalidToolCallSummary(BaseModel):
 
     round: int
     name: str | None
-    reason: Literal["unparseable", "missing_id", "duplicate_id"]
+    reason: Literal[
+        "unparseable",  # AIMessage.invalid_tool_calls
+        "missing_id",
+        "duplicate_id",
+        "textual_tool_call",  # pseudo tool call written as text (JSON / <tool_call> markup)
+        "empty_structured_output",  # bare {} / [] instead of an answer
+    ]
 
 
 class AssistantResult(BaseModel):

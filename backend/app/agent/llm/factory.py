@@ -27,6 +27,8 @@ def _build_ollama(config: LLMConfig) -> BaseChatModel:
         temperature=0,
         num_predict=OLLAMA_NUM_PREDICT,
         validate_model_on_init=False,  # no network during construction
+        # No reasoning/think setting is forced: the default (qwen3:4b-instruct) is a
+        # non-thinking model, and Ollama may reject `think` for models that lack it.
         client_kwargs={"timeout": httpx.Timeout(config.timeout_seconds)},
     )
 

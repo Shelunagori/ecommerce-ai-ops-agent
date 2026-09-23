@@ -4,7 +4,8 @@
     for round in 1..max_model_rounds:
         ai = model(messages, tools=registry)            # Step 4 provider, per-call retry
         invalid_tool_calls  -> agent_protocol_error     (nothing executed, nothing fabricated)
-        no tool calls       -> final answer (ai.text)   (empty -> agent_empty_answer)
+        no tool calls       -> final answer (ai.text)   (empty -> agent_empty_answer;
+                               textual pseudo tool call / bare {} -> agent_protocol_error)
         missing/duplicate id-> agent_protocol_error
         batch over budget   -> agent_limit_exceeded     (whole batch rejected, none executed)
         append ai (the ORIGINAL AIMessage, provider metadata intact)
@@ -22,6 +23,7 @@ from collections.abc import Sequence
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.tools import BaseTool
 
+from app.agent.assistant.answer import detect_protocol_artifact
 from app.agent.assistant.errors import AssistantError
 from app.agent.assistant.executor import ToolExecutionError, ToolExecutor, safe_name
 from app.agent.assistant.limits import AssistantLimits
@@ -96,6 +98,16 @@ class CommerceAssistant:
                 answer = ai.text.strip()
                 if not answer:
                     raise AssistantError("agent_empty_answer")
+                artifact = detect_protocol_artifact(answer)
+                if artifact is not None:
+                    # Text-only pseudo tool call or bare {} / []: never executed, never
+                    # returned as an answer. Tools run only from parsed tool_calls.
+                    run.invalid_calls.append(
+                        InvalidToolCallSummary(
+                            round=round_no, name=artifact.name, reason=artifact.kind
+                        )
+                    )
+                    raise AssistantError("agent_protocol_error", detail="protocol_artifact")
                 return AssistantResult(
                     answer=answer,
                     provider=self._provider.info.provider,

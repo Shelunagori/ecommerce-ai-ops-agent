@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = Field(default=60.0, ge=1, le=300)  # seconds
     llm_max_retries: int = Field(default=1, ge=0, le=2)  # transient failures only
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "llama3.2:3b"
+    ollama_model: str = "qwen3:4b-instruct"
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-3.8-flash"
 

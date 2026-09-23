@@ -1,6 +1,6 @@
 """OPT-IN live provider smoke tests. Skipped unless explicitly enabled:
 
-    RUN_OLLAMA_INTEGRATION=1  (needs `ollama serve` + `ollama pull llama3.2:3b`)
+    RUN_OLLAMA_INTEGRATION=1  (needs `ollama serve` + `ollama pull qwen3:4b-instruct`)
     RUN_GEMINI_INTEGRATION=1  (needs GEMINI_API_KEY; synthetic prompts only; uses quota)
 
 These validate PROVIDER INTEGRATION (invocation, native structured output, schema
