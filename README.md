@@ -7,7 +7,7 @@ invoices, shipments and company policies, with human approval for sensitive acti
 > **Data notice:** no real customer or company data is used. The project will use
 > synthetic ecommerce data only.
 
-## Status: Step 2 — structured ecommerce data
+## Status: Step 3 — deterministic agent tools
 
 What exists today:
 
@@ -19,17 +19,22 @@ What exists today:
 - A tenant-scoped, read-only **query layer** (`app/services`) that future agent tools will
   call directly, plus a small set of read-only `/api/...` endpoints over it
 - An idempotent **synthetic** seed script with two demo tenants
+- **12 read-only agent tools** (`app/agent/tools`, LangChain `@tool` + `ToolRuntime`) over
+  the query layer, with typed bounded inputs, a stable JSON envelope and tenant context
+  injected at runtime (never a model argument) — plus a developer CLI to run them. No model
+  calls them yet.
 - Next.js page showing API/database status and per-tenant demo data counts
 - Backend tests, including real-PostgreSQL tests for constraints and cross-tenant isolation
 
-What does **not** exist yet: business actions/writes, LLM integration, agents, RAG,
+What does **not** exist yet: business actions/writes, LLM integration, agents or LangGraph
+workflows, RAG,
 embeddings, vector search, approvals, evaluation or observability. Those are planned,
 not built.
 
 ## Planned capabilities
 
-Done: relational ecommerce data model and synthetic seed data. Next, roughly in order:
-business tools → LLM provider abstraction (Ollama locally, Gemini for the hosted demo) → LangGraph
+Done: relational ecommerce data model, synthetic seed data, read-only business tools.
+Next, roughly in order: LLM provider abstraction (Ollama locally, Gemini for the hosted demo) → LangGraph
 agent → RAG over company policies with pgvector → human-in-the-loop approvals → agent
 state/memory → evaluation → observability → production deployment.
 
@@ -151,6 +156,19 @@ Errors use one envelope: `{"error": {"code", "message"}, "request_id"}`.
 - http://localhost:8000/health → `{"status":"ok","service":"commerceops-api"}`
 - http://localhost:8000/health/db → `{"status":"ok","database":"reachable"}` (HTTP 503 if not)
 - http://localhost:8000/docs → OpenAPI UI
+
+### Agent tools (no model yet)
+
+```bash
+uv run python -m scripts.run_tool --list      # tools + model-visible parameters
+uv run python -m scripts.run_tool --tenant $NORTHSTAR --tool get_order \
+  --args '{"order_number": "ORD-1010"}'
+uv run python -m scripts.run_tool --tenant $BLUEPEAK --tool list_delayed_shipments
+```
+
+The tenant comes from `--tenant` (trusted runtime context), never from `--args`.
+Developer tooling only — not an HTTP endpoint.
+External tracing (LangSmith) is opt-in and off by default (`LANGSMITH_TRACING=false`).
 
 ## 4. Frontend
 

@@ -1,11 +1,13 @@
 # Architecture notes
 
-Current step: **Step 2 — structured ecommerce data.** No AI, RAG, embeddings or agents yet.
+Current step: **Step 3 — deterministic read-only agent tools.** No LLM, agent, LangGraph
+workflow, RAG or embeddings yet.
 
 | Concern | Where it lives |
 | --- | --- |
 | Structured business data | PostgreSQL (7 tables, Alembic migration `0001`) |
 | Access to that data | `app/services` tenant-scoped query classes (read-only) |
+| Agent-facing capabilities | `app/agent/tools` — 12 typed, read-only LangChain tools (no model yet) |
 | AI / RAG / embeddings | Not implemented yet (pgvector image present, extension not enabled) |
 
 ## Backend layout (`backend/`)
@@ -26,7 +28,15 @@ Current step: **Step 2 — structured ecommerce data.** No AI, RAG, embeddings o
 | `app/api/errors.py` | Uniform error envelope, 422/404/500 handlers |
 | `app/api/middleware.py` | Request id, `X-Request-ID` response header, one access-log line per request |
 | `app/api/routes/commerce.py` | Read-only `/api/...` endpoints |
+| `app/agent/context.py` | `AgentContext(tenant_id, request_id)` + `create_agent_context()` (trusted boundary, checks tenant exists) |
+| `app/agent/tools/schemas.py` | Model-visible input schemas (`extra="forbid"`, bounded limits, injected `runtime`) |
+| `app/agent/tools/{customers,orders,invoices,shipments,products}.py` | The tools |
+| `app/agent/tools/runtime.py` | Per-call execution: read-only session, error classification, logging |
+| `app/agent/tools/envelope.py` | `{"ok", "data" \| "error"}` result envelope |
+| `app/agent/tools/registry.py` | `build_commerce_tools()` — the explicit list of permitted tools |
+| `app/agent/tools/invoke.py` | Direct invocation with a trusted context (CLI/tests) |
 | `scripts/seed_demo.py` | Idempotent synthetic seed |
+| `scripts/run_tool.py` | Developer-only CLI to run one registered tool without a model |
 
 ## Domain model
 
@@ -149,6 +159,89 @@ Rules: refuses `APP_ENV=production`; ids are UUID5 of the natural key; upserts c
 those ids only; it never deletes and never overwrites unrelated rows (a conflicting
 non-demo natural key aborts the whole seed); unchanged rows are not rewritten. Dates are
 fixed, so derived states such as "overdue" change as real time passes (by design).
+
+## Structured Agent Tools
+
+```text
+Future LLM
+   ↓  chooses a tool + business arguments only (customer_code, order_number, sku, query, limit …)
+Typed Agent Tool          app/agent/tools   (schema validation, envelope, logging)
+   ↓  ToolRuntime.context = AgentContext(tenant_id, request_id)  ← set by trusted host code
+Tenant-scoped Service     app/services      (Step 2 query classes, no SQL in the tool layer)
+   ↓  own read-only session per call (SET TRANSACTION READ ONLY, always rolled back)
+PostgreSQL
+```
+
+**Packages:** `langchain==1.4.2` (pulls `langchain-core 1.6.4`; and, because `ToolRuntime`
+is defined in `langgraph.prebuilt`, also `langgraph 1.2.12`, `langgraph-prebuilt 1.1.0`,
+`langgraph-checkpoint 4.2.0`, `langgraph-sdk 0.4.5`, `langsmith 0.14.0`). Application code
+imports only `langchain.tools` (`tool`, `ToolRuntime`, `BaseTool`); a test enforces that no
+application module imports `langgraph`.
+
+**External tracing is opt-in.** `langsmith` is installed as a dependency but nothing enables
+it; `LANGSMITH_TRACING=false` is the documented default. LangSmith reads it from the
+*process* environment (export it, or set it on the host such as Railway) — pydantic-settings
+does not export `.env` values. Enabling tracing (and adding an API key) is a deliberate
+decision for the observability step, because traces would leave the machine.
+
+**Tools (12, all read-only):** `get_customer`, `search_customers`, `get_order`,
+`list_customer_orders`, `get_latest_customer_order`, `get_invoice`,
+`get_latest_unpaid_invoice`, `get_shipment`, `get_order_shipments`,
+`list_delayed_shipments`, `get_product`, `search_products`. `build_commerce_tools()` is the
+single, explicit registry; it refuses to build if the list drifts.
+
+**Inputs.** Pydantic schemas with `extra="forbid"`: identifiers are trimmed, 1–32 chars,
+`[A-Za-z0-9][A-Za-z0-9._-]*`; search text 1–100 chars; `limit` defaults to 5, max 20. No
+offset, ordering, column names or filter expressions. `runtime: ToolRuntime[AgentContext]`
+is declared on the schema so LangChain strips it from the model-facing schema; a validator
+accepts only a real injected `ToolRuntime` instance, so it cannot be forged from JSON.
+
+**Outputs.** Every tool returns a structured, JSON-compatible dict envelope:
+`{"ok": true, "data": …}` or `{"ok": false, "error": {"code", "message"}}`. Objects reuse the
+Step 2 read models (money as strings, ISO-8601 datetimes); lists are
+`{"items", "count", "has_more"}` (one extra row is fetched to set `has_more`); a valid query
+with nothing to report (e.g. no unpaid invoice) is `{"ok": true, "data": null}`. When a tool
+is called with a ToolCall, LangChain serialises the dict to JSON text in the `ToolMessage`
+the model reads. The single exception is argument validation: LangChain's
+`handle_validation_error` callback must return `str`, so that boundary returns the *same*
+`{ok, error}` envelope already serialised to JSON.
+
+**Errors.** Expected: `<resource>_not_found` (identical for "exists in another tenant" and
+"does not exist"), `invalid_arguments` (field names and error types only, input never
+echoed). Infrastructure: `service_unavailable` (database unreachable/not configured),
+`internal_error` (anything else, including a missing/forged runtime or wrong context type).
+Exception text never reaches the model; logs carry exception *type* only.
+
+**Logging.** One `app.agent.tools` line per call: `tool`, `tenant_id`, `request_id`,
+`outcome`, `error_code`, `duration_ms`. No payloads, prompts or record contents.
+
+**Sessions.** Each invocation opens its own read-only session via the injected
+`ToolDependencies.session_scope` (default `read_only_session`) and closes it before
+returning, so concurrent tool calls never share a SQLAlchemy session. Tools are synchronous
+(a future graph runs them in a thread pool).
+
+### Why no direct SQL tool?
+The model receives narrow business capabilities, not database access. A `run_sql` /
+`query_database` / generic HTTP tool would bypass tenant scoping, read-only guarantees and
+input validation, and make behaviour impossible to test exhaustively. Adding a capability
+means adding one reviewed tool to the registry.
+
+### Why is the tenant ID hidden from the model?
+Tenant identity is an authorization/runtime concern, not something the model may select.
+It is set by trusted code (the CLI today, authenticated requests later) in
+`ToolRuntime.context`; model-visible schemas contain no tenant or request fields, and a
+smuggled `tenant_id` argument is rejected as `invalid_arguments`. Tenant existence is
+checked once at the context-creation boundary (`create_agent_context`), not per tool call.
+
+### Why are structured facts not RAG?
+Orders, invoice amounts and shipment state are authoritative relational records. They must
+be exact, current and tenant-scoped, so tools read them through deterministic queries rather
+than retrieving text by similarity.
+
+### Why test tools without an LLM?
+Tool correctness (right data, right tenant, bounded, safe errors) and agent reasoning are
+separate concerns. Testing tools deterministically first means later agent failures can be
+attributed to reasoning, not to data access.
 
 ## Open items
 

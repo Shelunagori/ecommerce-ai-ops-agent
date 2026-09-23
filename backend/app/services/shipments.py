@@ -45,7 +45,7 @@ class ShipmentQueries(TenantScopedQueries):
             raise NotFoundError("shipment", shipment_number)
         return found[0]
 
-    def list_for_order(self, order_number: str) -> list[ShipmentRead]:
+    def list_for_order(self, order_number: str, limit: int = DEFAULT_LIMIT) -> list[ShipmentRead]:
         order_id = self._session.scalar(
             select(Order.id).where(
                 Order.tenant_id == self._tenant_id, Order.order_number == order_number
@@ -54,7 +54,10 @@ class ShipmentQueries(TenantScopedQueries):
         if order_id is None:
             raise NotFoundError("order", order_number)
         return self._read(
-            self._base().where(Shipment.order_id == order_id).order_by(*_NEWEST_FIRST)
+            self._base()
+            .where(Shipment.order_id == order_id)
+            .order_by(*_NEWEST_FIRST)
+            .limit(clamp_limit(limit))
         )
 
     def latest_for_order(self, order_number: str) -> ShipmentRead | None:
