@@ -1,0 +1,27 @@
+# Local development only: PostgreSQL + pgvector.
+# The backend and frontend run on the host during development.
+# Credentials come from the root .env (see .env.example) - none are hard-coded.
+
+services:
+  db:
+    # pg17 locally; app code relies only on standard PostgreSQL + the vector extension.
+    image: pgvector/pgvector:pg17
+    container_name: commerceops-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    ports:
+      # Bound to localhost only - not reachable from the network.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - commerceops-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  commerceops-pgdata:
