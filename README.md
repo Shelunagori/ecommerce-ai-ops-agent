@@ -7,24 +7,29 @@ invoices, shipments and company policies, with human approval for sensitive acti
 > **Data notice:** no real customer or company data is used. The project will use
 > synthetic ecommerce data only.
 
-## Status: Foundation (Step 1)
+## Status: Step 2 — structured ecommerce data
 
 What exists today:
 
-- FastAPI backend with environment-based configuration, structured JSON logging,
-  CORS, and health endpoints (`/health`, `/health/db`)
-- SQLAlchemy 2 + psycopg 3 database layer and an Alembic setup (no migrations yet)
-- Local PostgreSQL + pgvector via Docker Compose
-- Next.js (App Router, TypeScript, Tailwind) home page showing API and database status
-- Backend test suite (pytest)
+- FastAPI backend with environment-based configuration, structured JSON logging
+  (with request id and tenant id), CORS, and health endpoints (`/health`, `/health/db`)
+- **Ecommerce domain model** in PostgreSQL: tenants, customers, products, orders,
+  order items, invoices, shipments — with database-enforced tenant integrity
+- Alembic migration `0001` for the whole schema (no extensions enabled)
+- A tenant-scoped, read-only **query layer** (`app/services`) that future agent tools will
+  call directly, plus a small set of read-only `/api/...` endpoints over it
+- An idempotent **synthetic** seed script with two demo tenants
+- Next.js page showing API/database status and per-tenant demo data counts
+- Backend tests, including real-PostgreSQL tests for constraints and cross-tenant isolation
 
-What does **not** exist yet: domain models, data, business tools, LLM integration,
-agents, RAG, embeddings, evaluation or observability. Those are planned, not built.
+What does **not** exist yet: business actions/writes, LLM integration, agents, RAG,
+embeddings, vector search, approvals, evaluation or observability. Those are planned,
+not built.
 
 ## Planned capabilities
 
-Roughly in this order: relational ecommerce data model → synthetic seed data → business
-tools → LLM provider abstraction (Ollama locally, Gemini for the hosted demo) → LangGraph
+Done: relational ecommerce data model and synthetic seed data. Next, roughly in order:
+business tools → LLM provider abstraction (Ollama locally, Gemini for the hosted demo) → LangGraph
 agent → RAG over company policies with pgvector → human-in-the-loop approvals → agent
 state/memory → evaluation → observability → production deployment.
 
@@ -32,22 +37,51 @@ state/memory → evaluation → observability → production deployment.
 
 ```
 Browser ──▶ Next.js frontend (Vercel) ──fetch──▶ FastAPI backend (Railway / any Docker host)
-                                                     │  SQLAlchemy + psycopg 3
-                                                     ▼
-                                   PostgreSQL + pgvector (local Docker / Supabase)
+                                                   │  api/  → read-only routes, X-Tenant-ID demo header
+                                                   │  services/ → tenant-scoped query classes
+                                                   │  SQLAlchemy 2 + psycopg 3
+                                                   ▼
+                                 PostgreSQL (+ pgvector image; extension not enabled yet)
 ```
+
+| Concern | Where it lives today |
+| --- | --- |
+| Structured business data (orders, invoices, shipments, …) | PostgreSQL tables, queried deterministically |
+| AI / RAG / embeddings | **Not implemented yet** |
 
 - The backend is stateless; all state lives in PostgreSQL. No Redis, queues or workers.
-- Supabase is treated as plain hosted PostgreSQL (no Supabase SDK), so any PostgreSQL
-  with the `vector` extension works.
-- See [docs/architecture.md](docs/architecture.md) for decisions and layout.
+- Supabase is treated as plain hosted PostgreSQL (no Supabase SDK).
+- Details and decisions: [docs/architecture.md](docs/architecture.md); open follow-ups: [docs/pending-items.md](docs/pending-items.md).
 
 ```
-backend/   FastAPI app (app/api, core, db, models, schemas, services), tests, Alembic, Dockerfile
-frontend/  Next.js app (src/app, src/components, src/lib/api.ts)
+backend/   app/{api,core,db,models,schemas,services}, alembic/, scripts/seed_demo.py, tests/
+frontend/  Next.js app (src/app, src/components, src/lib/api.ts, src/lib/demo.ts)
 docs/      Architecture notes
-docker-compose.yml   Local PostgreSQL + pgvector
+docker-compose.yml   Local PostgreSQL + pgvector image
 ```
+
+### Why structured facts use database queries, not RAG
+
+Order status, invoice amounts, due dates and shipment state are authoritative relational
+facts. They change, must be exact, and must be scoped to one tenant. They are therefore
+read from PostgreSQL through deterministic, tenant-scoped queries — not retrieved
+probabilistically from embeddings, which can return stale, approximate or wrong-tenant
+text. RAG (later) is intended for unstructured knowledge such as company policies.
+
+### Multi-tenancy
+
+Every business row carries `tenant_id`, and child rows reference their parents through
+composite `(tenant_id, id)` foreign keys, so PostgreSQL itself rejects e.g. a Tenant A
+order pointing at a Tenant B customer. Every query method is bound to a `TenantContext`.
+
+> **The `X-Tenant-ID` header is NOT authentication.** It is a temporary demo mechanism
+> for propagating tenant context: any caller can send any tenant id. It will be replaced
+> by authenticated tenant context; only `app/api/deps.py` has to change for that.
+
+### Data
+
+All data in this repository is **synthetic** (seeded by `backend/scripts/seed_demo.py`).
+Names, emails (`example.com` / `example.org`), SKUs and tracking numbers are invented.
 
 ## Prerequisites
 
@@ -91,9 +125,28 @@ Port 5432 is bound to `127.0.0.1` only.
 
 ```bash
 cd backend
-uv sync                     # installs exact versions from uv.lock
+uv sync                              # installs exact versions from uv.lock
+uv run alembic upgrade head          # create/upgrade the schema
+uv run python -m scripts.seed_demo   # idempotent synthetic demo data (refuses APP_ENV=production)
 uv run uvicorn app.main:app --reload --port 8000
 ```
+
+Try it (demo tenant ids are deterministic and printed by the seed script):
+
+```bash
+NORTHSTAR=17243d88-ed66-5445-955b-7d7572094122
+BLUEPEAK=11a6d918-f89f-59b5-ab1e-45a109978c8a
+curl -s localhost:8000/api/orders/ORD-1001 -H "X-Tenant-ID: $NORTHSTAR"
+curl -s localhost:8000/api/orders/ORD-1001 -H "X-Tenant-ID: $BLUEPEAK"   # different order
+curl -s "localhost:8000/api/shipments?status=delayed" -H "X-Tenant-ID: $NORTHSTAR"
+```
+
+Read-only endpoints (all require `X-Tenant-ID`): `/api/customers[?search=]`,
+`/api/customers/{code}`, `/api/customers/{code}/orders`,
+`/api/customers/{code}/invoices/unpaid`, `/api/orders?status=`, `/api/orders/{number}`,
+`/api/invoices/{number}`, `/api/shipments[?status=]`, `/api/shipments/{number}`,
+`/api/products[?search=]`, `/api/products/{sku}`, `/api/demo/summary`.
+Errors use one envelope: `{"error": {"code", "message"}, "request_id"}`.
 
 - http://localhost:8000/health → `{"status":"ok","service":"commerceops-api"}`
 - http://localhost:8000/health/db → `{"status":"ok","database":"reachable"}` (HTTP 503 if not)
@@ -111,11 +164,13 @@ npm run dev                 # http://localhost:3000
 
 ```bash
 cd backend
-uv run pytest               # unit tests; no database needed
 uv run ruff check . && uv run ruff format --check .
+uv run pytest               # without TEST_DATABASE_URL: unit tests only, DB tests are skipped
 
-# optional integration test against the local DB:
-TEST_DATABASE_URL=postgresql://commerceops:<password>@localhost:5432/commerceops uv run pytest -m integration
+# Full suite against real PostgreSQL. Use a DEDICATED database whose name ends in _test:
+# the suite runs `alembic downgrade base`, so it refuses any other database name.
+docker compose exec db createdb -U commerceops commerceops_test     # once
+TEST_DATABASE_URL=postgresql://commerceops:<password>@localhost:5432/commerceops_test uv run pytest
 
 cd ../frontend
 npm run lint && npm run typecheck && npm run build

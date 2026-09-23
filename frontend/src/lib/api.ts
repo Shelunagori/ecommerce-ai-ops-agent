@@ -20,19 +20,23 @@ export type ApiResult<T> =
   | { ok: true; status: number; data: T }
   | { ok: false; status: number | null; data: T | null; error: string };
 
-export async function apiGet<T>(path: string, timeoutMs = 5000): Promise<ApiResult<T>> {
+export async function apiGet<T>(
+  path: string,
+  { headers = {}, timeoutMs = 5000 }: { headers?: Record<string, string>; timeoutMs?: number } = {},
+): Promise<ApiResult<T>> {
   if (!API_URL) {
     return { ok: false, status: null, data: null, error: "NEXT_PUBLIC_API_URL is not set" };
   }
   try {
     const res = await fetch(`${API_URL}${path}`, {
-      headers: { Accept: "application/json" },
+      headers: { Accept: "application/json", ...headers },
       cache: "no-store",
       signal: AbortSignal.timeout(timeoutMs),
     });
     const data = (await res.json().catch(() => null)) as T | null;
     if (res.ok && data !== null) return { ok: true, status: res.status, data };
-    return { ok: false, status: res.status, data, error: `HTTP ${res.status}` };
+    const code = (data as { error?: { code?: string } } | null)?.error?.code;
+    return { ok: false, status: res.status, data, error: code ?? `HTTP ${res.status}` };
   } catch (err) {
     const error = err instanceof Error && err.name === "TimeoutError" ? "Timed out" : "Unreachable";
     return { ok: false, status: null, data: null, error };
@@ -47,3 +51,17 @@ export type DatabaseHealthResponse = {
 
 export const getHealth = () => apiGet<HealthResponse>("/health");
 export const getDatabaseHealth = () => apiGet<DatabaseHealthResponse>("/health/db");
+
+export type DemoSummary = {
+  tenant: { name: string; slug: string };
+  customers: number;
+  products: number;
+  orders: number;
+  unpaid_invoices: number;
+  overdue_invoices: number;
+  delayed_shipments: number;
+};
+
+/** Demo tenant context header (NOT authentication; see src/lib/demo.ts). */
+export const getDemoSummary = (tenantId: string) =>
+  apiGet<DemoSummary>("/api/demo/summary", { headers: { "X-Tenant-ID": tenantId } });
