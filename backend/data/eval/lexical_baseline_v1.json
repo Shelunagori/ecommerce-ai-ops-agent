@@ -1,0 +1,115 @@
+{
+  "retriever": "lexical-pg-fts-v1",
+  "chunker": "policy-section-v1",
+  "chunk_max_chars": 1200,
+  "chunk_overlap_chars": 0,
+  "k": 3,
+  "cases_file": "data/eval/policy_retrieval_cases.yaml",
+  "cases_version": 1,
+  "metrics": {
+    "all": {
+      "cases": 20,
+      "document_hit@1": 1.0,
+      "document_hit@3": 1.0,
+      "chunk_hit@1": 0.4,
+      "chunk_hit@3": 0.85
+    },
+    "bluepeak-retail": {
+      "cases": 10,
+      "document_hit@1": 1.0,
+      "document_hit@3": 1.0,
+      "chunk_hit@1": 0.4,
+      "chunk_hit@3": 0.9
+    },
+    "northstar-commerce": {
+      "cases": 10,
+      "document_hit@1": 1.0,
+      "document_hit@3": 1.0,
+      "chunk_hit@1": 0.4,
+      "chunk_hit@3": 0.8
+    }
+  },
+  "cases": {
+    "ns-delay-compensation": {
+      "document_rank": 1,
+      "chunk_rank": 3
+    },
+    "ns-delay-exclusions": {
+      "document_rank": 1,
+      "chunk_rank": null
+    },
+    "ns-cancel": {
+      "document_rank": 1,
+      "chunk_rank": 2
+    },
+    "ns-return-window": {
+      "document_rank": 1,
+      "chunk_rank": 3
+    },
+    "ns-return-shipping": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "ns-refund-timing-now": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "ns-refund-timing-june": {
+      "document_rank": 1,
+      "chunk_rank": 2
+    },
+    "ns-store-credit": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "ns-express-cost": {
+      "document_rank": 1,
+      "chunk_rank": null
+    },
+    "ns-po-box": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "bp-delay-compensation-now": {
+      "document_rank": 1,
+      "chunk_rank": 3
+    },
+    "bp-delay-compensation-june": {
+      "document_rank": 1,
+      "chunk_rank": 2
+    },
+    "bp-delay-claim-june": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "bp-cancel": {
+      "document_rank": 1,
+      "chunk_rank": 2
+    },
+    "bp-cancel-support": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "bp-return-window": {
+      "document_rank": 1,
+      "chunk_rank": 2
+    },
+    "bp-return-shipping": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "bp-refund-timing": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "bp-priority-cost": {
+      "document_rank": 1,
+      "chunk_rank": 3
+    },
+    "bp-express-cost": {
+      "document_rank": 1,
+      "chunk_rank": null
+    }
+  },
+  "ranking": "ts_rank_cd(title A + section A + content B, normalisation 1)"
+}

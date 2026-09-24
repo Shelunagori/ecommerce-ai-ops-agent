@@ -7,6 +7,8 @@ the tenant filter entirely.
 """
 
 import inspect as pyinspect
+import uuid
+from datetime import date
 
 import pytest
 from sqlalchemy import event
@@ -16,6 +18,7 @@ from app.models.enums import OrderStatus, ShipmentStatus
 from app.services import (
     CustomerQueries,
     InvoiceQueries,
+    KnowledgeQueries,
     OrderQueries,
     ProductQueries,
     ShipmentQueries,
@@ -31,6 +34,11 @@ SAMPLE_ARGS = {
     "sku": "SKU-1001",
     "term": "a",
     "status": None,
+    "document_key": "refund-policy",
+    "version": 1,
+    "as_of": date(2026, 6, 10),
+    "chunk_id": uuid.UUID(int=1),
+    "citation": "policy://refund-policy/v1#chunk-1",
 }
 STATUS_FOR = {OrderQueries: OrderStatus.PROCESSING, ShipmentQueries: ShipmentStatus.DELAYED}
 CLASSES = [
@@ -40,6 +48,7 @@ CLASSES = [
     InvoiceQueries,
     ShipmentQueries,
     SummaryQueries,
+    KnowledgeQueries,
 ]
 
 

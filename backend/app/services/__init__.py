@@ -13,6 +13,7 @@ from app.core.tenant import TenantContext
 from app.services.base import Clock, utc_now
 from app.services.customers import CustomerQueries
 from app.services.invoices import InvoiceQueries
+from app.services.knowledge import KnowledgeQueries
 from app.services.orders import OrderQueries
 from app.services.products import ProductQueries
 from app.services.shipments import ShipmentQueries
@@ -36,6 +37,7 @@ __all__ = [
     "CommerceQueries",
     "CustomerQueries",
     "InvoiceQueries",
+    "KnowledgeQueries",
     "OrderQueries",
     "ProductQueries",
     "ShipmentQueries",

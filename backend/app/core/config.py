@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     assistant_max_tool_calls: int = Field(default=8, ge=1, le=20)
     assistant_max_tool_calls_per_turn: int = Field(default=4, ge=1, le=8)
 
+    # Knowledge / policy chunking (Step 7). Trusted configuration; changing it changes the
+    # recorded chunking_hash, and ingestion then refuses to replace existing chunks.
+    knowledge_chunk_max_chars: int = Field(default=1200, ge=200, le=4000)
+    knowledge_chunk_overlap_chars: int = Field(default=0, ge=0, le=300)
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:

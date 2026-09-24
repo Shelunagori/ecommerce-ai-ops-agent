@@ -33,6 +33,10 @@ class ShipmentStatus(StrEnum):
     RETURNED = "returned"
 
 
+class DocumentType(StrEnum):
+    POLICY = "policy"
+
+
 def check_in(column: str, enum: type[StrEnum]) -> str:
     """SQL for a CHECK constraint restricting ``column`` to the enum's values."""
     values = ", ".join(f"'{member.value}'" for member in enum)

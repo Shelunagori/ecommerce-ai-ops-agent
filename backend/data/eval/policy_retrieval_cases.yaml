@@ -1,0 +1,111 @@
+# Policy retrieval evaluation cases (synthetic corpus). Started in Step 7 with the lexical
+# baseline; Step 8 semantic retrieval must be scored against these SAME cases.
+#
+# expected = the chunk that actually answers the question (citation is tenant-relative).
+# A document hit means the expected document_key AND version; a chunk hit means the exact
+# expected citation. Cases are written from the policy text, not tuned to the retriever.
+version: 1
+cases:
+  # --- Northstar Commerce ------------------------------------------------------------
+  - id: ns-delay-compensation
+    tenant: northstar-commerce
+    as_of: 2026-09-01
+    query: What compensation applies to delayed shipments?
+    expected: policy://delayed-shipment-compensation/v1#chunk-2
+  - id: ns-delay-exclusions
+    tenant: northstar-commerce
+    as_of: 2026-09-01
+    query: Which delays are excluded from compensation?
+    expected: policy://delayed-shipment-compensation/v1#chunk-3
+  - id: ns-cancel
+    tenant: northstar-commerce
+    as_of: 2026-09-01
+    query: Can I cancel an order?
+    expected: policy://order-cancellation/v1#chunk-1
+  - id: ns-return-window
+    tenant: northstar-commerce
+    as_of: 2026-09-01
+    query: How long can I return an item?
+    expected: policy://returns-policy/v1#chunk-1
+  - id: ns-return-shipping
+    tenant: northstar-commerce
+    as_of: 2026-09-01
+    query: Is return shipping free?
+    expected: policy://returns-policy/v1#chunk-3
+  - id: ns-refund-timing-now
+    tenant: northstar-commerce
+    as_of: 2026-09-01
+    query: When is a refund issued?
+    expected: policy://refund-policy/v2#chunk-1
+  - id: ns-refund-timing-june
+    tenant: northstar-commerce
+    as_of: 2026-06-10
+    query: When is a refund issued?
+    expected: policy://refund-policy/v1#chunk-1
+  - id: ns-store-credit
+    tenant: northstar-commerce
+    as_of: 2026-09-01
+    query: Can I get store credit instead of a refund?
+    expected: policy://refund-policy/v2#chunk-2
+  - id: ns-express-cost
+    tenant: northstar-commerce
+    as_of: 2026-09-01
+    query: How much does express shipping cost?
+    expected: policy://shipping-policy/v1#chunk-2
+  - id: ns-po-box
+    tenant: northstar-commerce
+    as_of: 2026-09-01
+    query: Do you ship to PO boxes?
+    expected: policy://shipping-policy/v1#chunk-4
+  # --- BluePeak Retail ------------------------------------------------------------------
+  - id: bp-delay-compensation-now
+    tenant: bluepeak-retail
+    as_of: 2026-09-01
+    query: What compensation applies to delayed shipments?
+    expected: policy://delayed-shipment-compensation/v2#chunk-2
+  - id: bp-delay-compensation-june
+    tenant: bluepeak-retail
+    as_of: 2026-06-10
+    query: What compensation applies to delayed shipments?
+    expected: policy://delayed-shipment-compensation/v1#chunk-2
+  - id: bp-delay-claim-june
+    tenant: bluepeak-retail
+    as_of: 2026-06-10
+    query: How do I claim compensation for a late parcel?
+    expected: policy://delayed-shipment-compensation/v1#chunk-3
+  - id: bp-cancel
+    tenant: bluepeak-retail
+    as_of: 2026-09-01
+    query: Can I cancel an order?
+    expected: policy://order-cancellation/v1#chunk-1
+  - id: bp-cancel-support
+    tenant: bluepeak-retail
+    as_of: 2026-09-01
+    query: Can support cancel my order for me?
+    expected: policy://order-cancellation/v1#chunk-2
+  - id: bp-return-window
+    tenant: bluepeak-retail
+    as_of: 2026-09-01
+    query: How long can I return an item?
+    expected: policy://returns-policy/v1#chunk-1
+  - id: bp-return-shipping
+    tenant: bluepeak-retail
+    as_of: 2026-09-01
+    query: Who pays for return shipping?
+    expected: policy://returns-policy/v1#chunk-3
+  - id: bp-refund-timing
+    tenant: bluepeak-retail
+    as_of: 2026-09-01
+    query: When is a refund issued?
+    expected: policy://refund-policy/v1#chunk-1
+  - id: bp-priority-cost
+    tenant: bluepeak-retail
+    as_of: 2026-09-01
+    query: How much does priority shipping cost?
+    expected: policy://shipping-policy/v1#chunk-2
+  - id: bp-express-cost
+    tenant: bluepeak-retail
+    as_of: 2026-09-01
+    # Vocabulary mismatch on purpose: BluePeak calls its fast option "Priority".
+    query: How much does express shipping cost?
+    expected: policy://shipping-policy/v1#chunk-2
