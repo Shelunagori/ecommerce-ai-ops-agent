@@ -1,10 +1,11 @@
 # Architecture notes
 
-Current step: **Step 6 — LangGraph orchestration.** The Step-5 single-turn assistant (12
-read-only tools bound to the model, explicit bounded tool-calling loop) is kept, and the same
-assistant also runs as a LangGraph `StateGraph` with optional, ephemeral in-memory
-checkpointing. There is no durable persistence, long-term memory, human approval, RAG or
-embeddings yet.
+Current step: **Step 7 — knowledge / RAG foundation.** Versioned synthetic policies are
+loaded, chunked, ingested and retrieved by a deterministic lexical baseline, tenant-scoped
+and effective-date aware, with citation-ready chunks. The Step-5 loop and the Step-6
+LangGraph assistant are unchanged and do not use the knowledge base yet. There are no
+embeddings, no vector search, no RAG answer generation, no durable persistence, long-term
+memory or human approval yet.
 
 | Concern | Where it lives |
 | --- | --- |
@@ -14,7 +15,8 @@ embeddings yet.
 | Tool-calling loop | `app/agent/assistant` — explicit, bounded, sequential (Step-5 reference / parity oracle) |
 | Graph orchestration | `app/agent/graph` — LangGraph `StateGraph` (model / tools nodes), same limits and result contract |
 | Language models | `app/agent/llm` — provider-neutral layer over Ollama (local) and Gemini (hosted) |
-| AI / RAG / embeddings | Not implemented yet (pgvector image present, extension not enabled) |
+| Policy knowledge | `app/knowledge` + `knowledge_documents` / `knowledge_chunks` (migration `0002`) — lexical retrieval |
+| Embeddings / vector search / RAG answers | Not implemented yet (pgvector image present, extension not enabled) |
 
 ## Backend layout (`backend/`)
 
@@ -64,6 +66,16 @@ embeddings yet.
 | `app/agent/graph/builder.py` | `build_commerce_graph(provider, *, tools, limits, checkpointer=None)` |
 | `app/agent/graph/runner.py` | `CommerceGraphAssistant.run(text, context, *, thread_id=None)` → `AssistantResult` |
 | `scripts/run_graph_assistant.py` | Developer-only CLI for the LangGraph assistant (optional in-process thread) |
+| `app/models/knowledge.py` | `KnowledgeDocument`, `KnowledgeChunk` |
+| `app/knowledge/sources.py` | Policy loader: discovery, front matter, validation, path safety, version ranges |
+| `app/knowledge/chunking.py` | `policy-section-v1` chunker, `ChunkingConfig` (+ `chunking_hash`) |
+| `app/knowledge/ingest.py` | Atomic idempotent ingestion, deterministic ids, conflict detection |
+| `app/knowledge/temporal.py` | `effective_date()` — date / aware datetime → UTC calendar date |
+| `app/knowledge/citations.py` | Tenant-relative citations `policy://<key>/v<n>#chunk-<i>` |
+| `app/knowledge/retrieval.py` | `KnowledgeRetriever` protocol, `LexicalPolicyRetriever` (`lexical-pg-fts-v1`) |
+| `app/knowledge/evaluation.py` | Retriever-agnostic hit@k evaluation over `data/eval/policy_retrieval_cases.yaml` |
+| `app/services/knowledge.py` | `KnowledgeQueries` — tenant-scoped document/chunk/effective-version/citation lookups |
+| `scripts/ingest_policies.py`, `scripts/search_policies.py` | Developer-only ingestion and search CLIs |
 
 ## Domain model
 
@@ -582,6 +594,121 @@ Never prompts, messages, model output, tool payloads, graph state or reasoning.
 ### Still missing after Step 6
 RAG, a durable (PostgreSQL) checkpointer, history trimming, human approval, write actions,
 evaluation and deeper observability.
+
+## Knowledge / RAG foundation
+
+```
+backend/data/policies/<tenant-slug>/<document_key>.v<N>.md   (synthetic, front matter + Markdown)
+   ↓  validated loader            (safe YAML, strict metadata, tenant + path checks, ranges)
+   ↓  policy-section-v1 chunking  (heading-aware; size refinement only when needed)
+   ↓  atomic idempotent ingestion
+knowledge_documents / knowledge_chunks   (tenant-aware composite FK, no vector column)
+   ↓  LexicalPolicyRetriever      (PostgreSQL FTS, tenant + as_of filter in the same SQL)
+ranked, citation-ready chunks            (no LLM, no embeddings, not wired into the agent)
+```
+
+**Corpus.** Five fictional policies per tenant with identical document keys
+(`shipping-policy`, `delayed-shipment-compensation`, `refund-policy`, `returns-policy`,
+`order-cancellation`) and deliberately different rules (e.g. returns within 30 vs 14 days;
+delay compensation after 3 business days vs 5 → 4). Northstar `refund-policy` and BluePeak
+`delayed-shipment-compensation` have two versions each. Every file says it is fictional.
+
+**Structured facts vs knowledge.** Exact, changing, per-record facts (an order total, an
+invoice status) stay relational and go through commerce tools. Rules written as prose
+("what is the cancellation policy?") are knowledge and go through retrieval.
+
+**Versions and effective dates.** A version applies when
+`effective_from <= as_of < effective_to` (`effective_to` NULL = open-ended), compared as UTC
+calendar dates. A `date` is used as-is; a `datetime` must be timezone-aware and is converted
+to UTC first; naive datetimes are rejected. Repositories never read the clock; the retriever
+uses an injected clock only when `as_of` is omitted. Why version at all: policies change,
+and a question about June must be answered from the policy effective in June.
+
+- **Immutability.** `immutable_content_hash` is the sha256 of the **immutable policy
+  payload** — tenant, key, title, type, version, `effective_from` and the body — and is
+  therefore *not* a hash of the complete source file: it deliberately excludes
+  `effective_to`, the one-time retirement field. The same (tenant, key, version) with a
+  different `immutable_content_hash` (body, title or `effective_from` changed) is a
+  `source_conflict`. The only permitted change to a stored version is **retirement**:
+  `effective_to: null -> date`, once, when its successor is published. Changing or
+  removing an already-set `effective_to` is a `source_conflict`.
+- **Derived chunks.** Chunks are materialised by a recorded chunker (`chunker`,
+  `chunking_hash` = chunker name + settings). Same source under a different chunker or
+  settings is a `chunking_mismatch` — the document did not change, its derived chunks
+  would. Automatic ingestion refuses to replace them; a future explicit re-chunk operation
+  would rebuild them deliberately.
+- **Overlap.** Ingestion rejects overlapping ranges (and versions that do not start after
+  their predecessor) across the files **and** all stored versions. The database adds
+  `version > 0`, `effective_to > effective_from` and a partial unique index allowing only
+  one open-ended version per tenant/key. **The database alone does not prevent every
+  overlap** of closed historical ranges (that would need a `btree_gist` exclusion
+  constraint); the validated ingestion path maintains that invariant (tested).
+
+**Chunking (`policy-section-v1`).** Split at ATX headings outside fenced code; each chunk
+keeps its heading path (`Refund Policy > Refund timing`). A section that fits
+`knowledge_chunk_max_chars` (default 1200, 200–4000) is one chunk. Only oversized sections
+are packed from blank-line blocks (lists, tables, code stay whole), then sentences, then a
+hard cut; optional `knowledge_chunk_overlap_chars` (default 0, ≤ 300) applies only between
+pieces of one split section. There is no universally right size: too small loses context,
+too large brings irrelevant text and lowers precision. With these short policies every
+section is one chunk (51 chunks for 12 documents).
+
+**Identity.** `document_id = uuid5(ns, tenant_id/key/v<version>)`,
+`chunk_id = uuid5(ns, document_id/index/chunk_content_hash)`: stable while source and
+chunking are unchanged; any content change changes the affected chunk's id.
+
+**Ingestion** (`scripts.ingest_policies`, dev only; refuses `APP_ENV=production`): loads,
+validates and chunks everything first; conflicts abort the whole run with no writes;
+otherwise inserts new versions and retires predecessors in one transaction. It never
+deletes rows (files removed from disk leave stored versions untouched). Logs: tenant id,
+document key, version, outcome, chunk count — never content.
+
+**Retrieval contract.** `KnowledgeRetriever.retrieve(query, context: AgentContext, *,
+as_of=None, limit=5) -> RetrievalResult`; limit is 1–10 (hard maximum, otherwise rejected).
+Each result: chunk id, citation, document key, title, version, section, chunk index,
+effective dates, content, score, rank. No tenant ids or file paths.
+
+**Lexical baseline (`lexical-pg-fts-v1`).** Why lexical first: a transparent,
+deterministic baseline to prove the contract, isolation, version filtering and citations,
+and a reference number Step 8 semantic retrieval must beat. The query is untrusted: at
+most 500 characters and 32 distinct `[a-z0-9]+` terms survive (punctuation and operators
+are discarded, the word "or" is dropped); they are joined as `t1 or t2 …` and bound as a
+parameter to `websearch_to_tsquery('english', …)`. No terms → empty result without a
+database call. Stop-word-only queries (`the`, `the and of`) survive the regex but lose every
+term to PostgreSQL's English dictionary: a pre-check measures `numnode` of the built
+tsquery and, at zero, returns an empty result without running the search (never a
+fallback to unfiltered or rank-zero results; `lexeme_count` reports 0). Score =
+`ts_rank_cd(setweight(title,'A') || setweight(section,'A') || setweight(content,'B'), q, 1)`
+(title and heading words weigh more than body text; normalised by 1 + log(length)). Tenant and effective-version filters sit in the same SQL statement.
+Order: score desc, document key, version desc, chunk index. Logs: retriever, tenant/request
+id, as_of, query length, term count, result count, citations, duration — never query text
+or content.
+
+**Citations.** `policy://<document_key>/v<version>#chunk-<index>` — what the model will cite
+later. They are **tenant-relative, not globally unique**: the same string names each
+tenant's own chunk. Resolution (`KnowledgeQueries.get_chunk_by_citation`) only happens
+inside a trusted tenant scope; a citation alone never performs a cross-tenant lookup.
+Why citations: a future LLM answer must be traceable to source, version and chunk.
+
+**Baseline evaluation** (`data/eval/policy_retrieval_cases.yaml`, 20 cases, expected chunk
+per case; recorded in `data/eval/lexical_baseline_v1.json`, k = 3):
+
+| Scope | document hit@1 | document hit@3 | chunk hit@1 | chunk hit@3 |
+| --- | --- | --- | --- | --- |
+| Northstar (10) | 1.00 | 1.00 | 0.40 | 0.80 |
+| BluePeak (10) | 1.00 | 1.00 | 0.40 | 0.90 |
+| All (20) | 1.00 | 1.00 | 0.40 | 0.85 |
+
+Adding the title to the ranking vector moved two BluePeak shipping questions to the right
+document at rank 1 (previously rank 2); chunk-level results did not change. The baseline
+finds the right policy and version but often not the exact section, and it still misses
+the exact chunk on vocabulary mismatches (BluePeak "express" vs its "Priority" option).
+Each document's first chunk is the fictional-policy disclaimer; this retrieval
+boilerplate may be reconsidered before or during vector indexing. The numbers are
+recorded as-is, not tuned; a test fails if they drift so changes are deliberate.
+
+**Not implemented:** embeddings, pgvector semantic retrieval, RAG answer generation,
+policy tools for the model, LangGraph integration.
 
 ## Open items
 

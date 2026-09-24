@@ -7,7 +7,7 @@ invoices, shipments and company policies, with human approval for sensitive acti
 > **Data notice:** no real customer or company data is used. The project will use
 > synthetic ecommerce data only.
 
-## Status: Step 6 — LangGraph orchestration
+## Status: Step 7 — knowledge / RAG foundation
 
 What exists today:
 
@@ -15,7 +15,8 @@ What exists today:
   (with request id and tenant id), CORS, and health endpoints (`/health`, `/health/db`)
 - **Ecommerce domain model** in PostgreSQL: tenants, customers, products, orders,
   order items, invoices, shipments — with database-enforced tenant integrity
-- Alembic migration `0001` for the whole schema (no extensions enabled)
+- Alembic migrations `0001` (ecommerce schema) and `0002` (knowledge documents/chunks); no
+  extensions enabled
 - A tenant-scoped, read-only **query layer** (`app/services`) that future agent tools will
   call directly, plus a small set of read-only `/api/...` endpoints over it
 - An idempotent **synthetic** seed script with two demo tenants
@@ -37,19 +38,27 @@ What exists today:
   context, the same limits and result contract, parity-tested against the Step 5 loop.
   Optional in-memory checkpointing with tenant-scoped thread IDs (ephemeral: lost when the
   process exits).
+- A **knowledge / RAG foundation** (`app/knowledge`): a synthetic, versioned policy corpus
+  for both tenants (`backend/data/policies`), a validated loader, a deterministic
+  section-aware chunker (`policy-section-v1`), atomic idempotent ingestion into
+  `knowledge_documents` / `knowledge_chunks`, effective-date version selection,
+  tenant-relative citations and a deterministic **lexical** baseline retriever
+  (PostgreSQL full-text search), with a 20-case retrieval evaluation set. It retrieves
+  chunks only: nothing is generated and the assistant does not use it yet.
 - Next.js page showing API/database status and per-tenant demo data counts
 - Backend tests, including real-PostgreSQL tests for constraints and cross-tenant isolation
 
-What does **not** exist yet: business actions/writes, durable checkpoints or long-term
-memory, human approval, RAG/company policies,
-embeddings, vector search, approvals, evaluation or observability. Those are planned,
-not built.
+What does **not** exist yet: embeddings, pgvector vector storage, semantic retrieval,
+RAG answer generation or policy tools for the model, business actions/writes, durable
+checkpoints or long-term memory, human approval, full evaluation or observability. Those
+are planned, not built.
 
 ## Planned capabilities
 
 Done: relational ecommerce data model, synthetic seed data, read-only business tools, LLM
 provider layer (Ollama / Gemini), explicit model-driven tool calling, LangGraph
-orchestration. Next, roughly in order: RAG over company policies with pgvector →
+orchestration, knowledge/RAG foundation with a lexical baseline. Next, roughly in order:
+embeddings + pgvector semantic retrieval → RAG answers with citations →
 human-in-the-loop approvals → durable agent state/memory → evaluation → observability →
 production deployment.
 
@@ -67,7 +76,8 @@ Browser ──▶ Next.js frontend (Vercel) ──fetch──▶ FastAPI backend
 | Concern | Where it lives today |
 | --- | --- |
 | Structured business data (orders, invoices, shipments, …) | PostgreSQL tables, queried deterministically |
-| AI / RAG / embeddings | **Not implemented yet** |
+| Policy knowledge (refunds, returns, shipping, …) | `knowledge_documents` / `knowledge_chunks`, lexical retrieval (Step 7) |
+| Embeddings / vector search / RAG answers | **Not implemented yet** |
 
 - The backend is stateless; all state lives in PostgreSQL. No Redis, queues or workers.
 - Supabase is treated as plain hosted PostgreSQL (no Supabase SDK).
@@ -86,7 +96,13 @@ Order status, invoice amounts, due dates and shipment state are authoritative re
 facts. They change, must be exact, and must be scoped to one tenant. They are therefore
 read from PostgreSQL through deterministic, tenant-scoped queries — not retrieved
 probabilistically from embeddings, which can return stale, approximate or wrong-tenant
-text. RAG (later) is intended for unstructured knowledge such as company policies.
+text. Policies are the opposite: prose that answers "what is the rule?", so they go
+through knowledge retrieval:
+
+```
+"What is the total of ORD-1001?"        → commerce tool → relational query (exact fact)
+"What is the cancellation policy?"      → knowledge retrieval → cited policy chunks
+```
 
 ### Multi-tenancy
 
@@ -227,6 +243,21 @@ stdout is JSON: answer, provider/model, prompt version, model-call count, tool-c
 runtime context and is validated before any model is built; it never reaches the prompt.
 Ask about policies (refunds, compensation) and it will say that knowledge is not available
 yet — there is no RAG.
+
+### Policy knowledge (ingest and search; no LLM)
+
+```bash
+uv run python -m scripts.seed_demo          # tenants must exist first
+uv run python -m scripts.ingest_policies    # idempotent; refuses APP_ENV=production
+uv run python -m scripts.search_policies --tenant $NORTHSTAR \
+  --query "compensation for delayed shipment" --as-of 2026-09-01
+```
+
+Ingestion prints a JSON summary (`inserted` / `unchanged` / `retired` / conflicts) and is
+atomic: an edited, already-ingested version or a changed chunking configuration aborts the
+run without writing. Search prints ranked chunks with score, citation
+(`policy://<document_key>/v<version>#chunk-<n>`), version and effective dates. `--as-of`
+takes a date or a timezone-aware datetime (naive datetimes are rejected).
 
 ### LangGraph assistant
 
