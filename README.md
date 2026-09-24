@@ -7,7 +7,7 @@ invoices, shipments and company policies, with human approval for sensitive acti
 > **Data notice:** no real customer or company data is used. The project will use
 > synthetic ecommerce data only.
 
-## Status: Step 5 — model-driven tool calling
+## Status: Step 6 — LangGraph orchestration
 
 What exists today:
 
@@ -30,21 +30,28 @@ What exists today:
 - A **model-driven commerce assistant** (`app/agent/assistant`): the model receives the 12
   tool schemas (`bind_tools`), requests tool calls, the host executes them through the
   Step 3 tools with the trusted tenant context, and the model answers from the results.
-  The tool-calling loop is explicit and bounded (no LangGraph yet), single-turn, read-only.
+  The tool-calling loop is explicit and bounded, single-turn, read-only; it is kept as the
+  reference implementation.
+- A **LangGraph** version of the same assistant (`app/agent/graph`): a `StateGraph` with a
+  model node and a tool node, typed state, trusted tenant context as LangGraph runtime
+  context, the same limits and result contract, parity-tested against the Step 5 loop.
+  Optional in-memory checkpointing with tenant-scoped thread IDs (ephemeral: lost when the
+  process exits).
 - Next.js page showing API/database status and per-tenant demo data counts
 - Backend tests, including real-PostgreSQL tests for constraints and cross-tenant isolation
 
-What does **not** exist yet: business actions/writes, LangGraph workflows, conversation
-memory or persistence, human approval, RAG/company policies,
+What does **not** exist yet: business actions/writes, durable checkpoints or long-term
+memory, human approval, RAG/company policies,
 embeddings, vector search, approvals, evaluation or observability. Those are planned,
 not built.
 
 ## Planned capabilities
 
 Done: relational ecommerce data model, synthetic seed data, read-only business tools, LLM
-provider layer (Ollama / Gemini), explicit model-driven tool calling. Next, roughly in
-order: LangGraph orchestration → RAG over company policies with pgvector → human-in-the-loop approvals → agent
-state/memory → evaluation → observability → production deployment.
+provider layer (Ollama / Gemini), explicit model-driven tool calling, LangGraph
+orchestration. Next, roughly in order: RAG over company policies with pgvector →
+human-in-the-loop approvals → durable agent state/memory → evaluation → observability →
+production deployment.
 
 ## Architecture (current)
 
@@ -221,6 +228,20 @@ runtime context and is validated before any model is built; it never reaches the
 Ask about policies (refunds, compensation) and it will say that knowledge is not available
 yet — there is no RAG.
 
+### LangGraph assistant
+
+```bash
+uv run python -m scripts.run_graph_assistant --tenant $NORTHSTAR --provider ollama \
+  --text "Show me order ORD-1001"
+# Same-process continuation on an in-memory thread (gone when the process exits):
+uv run python -m scripts.run_graph_assistant --tenant $NORTHSTAR --thread-id demo \
+  --text "Show me order ORD-1001" --text "Is it paid?"
+```
+
+Same JSON result as `run_assistant` (a list when `--text` is repeated). `--thread-id`
+enables LangGraph's `InMemorySaver` for this process only; nothing is written to disk or
+the database.
+
 ## 4. Frontend
 
 ```bash
@@ -245,6 +266,8 @@ TEST_DATABASE_URL=postgresql://commerceops:<password>@localhost:5432/commerceops
 # They check provider integration and the structured-output contract, not model quality:
 RUN_OLLAMA_INTEGRATION=1 uv run pytest tests/integration -m llm_integration
 RUN_GEMINI_INTEGRATION=1 uv run pytest tests/integration -m llm_integration   # uses quota
+# Live tool-calling loops (Step 5 loop and Step 6 graph) need TEST_DATABASE_URL as well:
+RUN_OLLAMA_INTEGRATION=1 TEST_DATABASE_URL=... uv run pytest tests/db/test_assistant_live.py tests/db/test_graph_live.py
 
 cd ../frontend
 npm run lint && npm run typecheck && npm run build

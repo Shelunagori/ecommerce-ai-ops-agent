@@ -1,8 +1,9 @@
 # Architecture notes
 
-Current step: **Step 5 — model-driven tool calling.** A single-turn commerce assistant binds
-the 12 read-only tools to the model and runs an explicit, bounded tool-calling loop. There
-is no LangGraph workflow, conversation memory, persistence, human approval, RAG or
+Current step: **Step 6 — LangGraph orchestration.** The Step-5 single-turn assistant (12
+read-only tools bound to the model, explicit bounded tool-calling loop) is kept, and the same
+assistant also runs as a LangGraph `StateGraph` with optional, ephemeral in-memory
+checkpointing. There is no durable persistence, long-term memory, human approval, RAG or
 embeddings yet.
 
 | Concern | Where it lives |
@@ -10,7 +11,8 @@ embeddings yet.
 | Structured business data | PostgreSQL (7 tables, Alembic migration `0001`) |
 | Access to that data | `app/services` tenant-scoped query classes (read-only) |
 | Agent-facing capabilities | `app/agent/tools` — 12 typed, read-only LangChain tools, bound to the model by the assistant |
-| Tool-calling loop | `app/agent/assistant` — explicit, bounded, sequential (no LangGraph yet) |
+| Tool-calling loop | `app/agent/assistant` — explicit, bounded, sequential (Step-5 reference / parity oracle) |
+| Graph orchestration | `app/agent/graph` — LangGraph `StateGraph` (model / tools nodes), same limits and result contract |
 | Language models | `app/agent/llm` — provider-neutral layer over Ollama (local) and Gemini (hosted) |
 | AI / RAG / embeddings | Not implemented yet (pgvector image present, extension not enabled) |
 
@@ -56,6 +58,12 @@ embeddings yet.
 | `scripts/run_tool.py` | Developer-only CLI to run one registered tool without a model |
 | `scripts/run_llm.py` | Developer-only CLI to run the structured intent analysis against a provider |
 | `scripts/run_assistant.py` | Developer-only CLI to run the commerce assistant for one tenant |
+| `app/agent/graph/state.py` | `CommerceGraphState` (TypedDict, `add_messages`), per-run reset, tenant-scoped thread key, `scope_digest` |
+| `app/agent/graph/routing.py` | `evaluate_model_turn()` (pure checks) and the conditional-edge functions |
+| `app/agent/graph/nodes.py` | `GraphNodes.model` / `GraphNodes.tools` (Step-4 provider, Step-5 `ToolExecutor`) |
+| `app/agent/graph/builder.py` | `build_commerce_graph(provider, *, tools, limits, checkpointer=None)` |
+| `app/agent/graph/runner.py` | `CommerceGraphAssistant.run(text, context, *, thread_id=None)` → `AssistantResult` |
+| `scripts/run_graph_assistant.py` | Developer-only CLI for the LangGraph assistant (optional in-process thread) |
 
 ## Domain model
 
@@ -193,9 +201,10 @@ PostgreSQL
 
 **Packages:** `langchain==1.4.2` (pulls `langchain-core 1.6.4`; and, because `ToolRuntime`
 is defined in `langgraph.prebuilt`, also `langgraph 1.2.12`, `langgraph-prebuilt 1.1.0`,
-`langgraph-checkpoint 4.2.0`, `langgraph-sdk 0.4.5`, `langsmith 0.14.0`). Application code
-imports only `langchain.tools` (`tool`, `ToolRuntime`, `BaseTool`); a test enforces that no
-application module imports `langgraph`.
+`langgraph-checkpoint 4.2.0`, `langgraph-sdk 0.4.5`, `langsmith 0.14.0`). The tools
+import only `langchain.tools` (`tool`, `ToolRuntime`, `BaseTool`). Since Step 6 `langgraph` is a
+direct dependency (same locked version) and a test enforces that only `app/agent/graph/`
+imports it.
 
 **External tracing is opt-in.** `langsmith` is installed as a dependency but nothing enables
 it; `LANGSMITH_TRACING=false` is the documented default. LangSmith reads it from the
@@ -446,13 +455,133 @@ Step 3 per-tool log lines remain.
 It separates (1) model/tool protocol correctness from (2) workflow orchestration and state
 management, so failures are easier to locate.
 
-### What LangGraph will add (Step 6)
-Explicit graph state, controlled transitions and, later, durable checkpoints. Nothing in
-Step 5 persists state or remembers earlier conversations; there is no human approval.
+### What LangGraph adds (Step 6)
+See [LangGraph Orchestration](#langgraph-orchestration). The Step-5 loop itself is unchanged
+and still persists nothing.
 
 ### Still missing
 RAG / company policies, persistent conversation state, human approval, write tools,
 evaluation framework, full observability.
+
+## LangGraph Orchestration
+
+Step 6 re-implements the Step-5 assistant as a LangGraph `StateGraph`
+(`langgraph==1.2.12`, a direct dependency pinned to the already-locked version).
+
+```
+Step 5:  CommerceAssistant       → explicit Python loop       (kept: reference + parity oracle)
+Step 6:  CommerceGraphAssistant  → StateGraph (model / tools)
+```
+
+```mermaid
+graph TD
+  START([START]) --> MODEL[model]
+  MODEL -- "approved tool batch" --> TOOLS[tools]
+  MODEL -- "final answer / terminal error" --> END([END])
+  TOOLS -- "batch complete" --> MODEL
+  TOOLS -- "tool-result protocol error" --> END
+```
+
+The graph and the Step-5 loop share only lower-level pieces: the Step-4 provider,
+the Step-3 tool registry, `ToolExecutor`, the prompt, `detect_protocol_artifact`,
+`AssistantLimits` and the result models. The orchestration is written separately so the
+parity tests compare two implementations. LangGraph is imported only under
+`app/agent/graph/` (enforced by a test).
+
+**State** (`CommerceGraphState`): `messages` (`add_messages` reducer — node updates append),
+`scope_digest`, `pending` (approved AIMessage awaiting TOOLS), `model_calls`, `tool_calls`
+and `invalid_tool_calls` (plain dicts), `seen_tool_call_ids`, `answer`, `error`. No sessions,
+provider clients, settings, secrets, raw tenant IDs or raw thread IDs; durations are measured
+by the runner.
+
+**Runtime context.** `StateGraph(..., context_schema=AgentContext)` and
+`graph.invoke(..., context=agent_context)`: nodes receive the same trusted `AgentContext`
+via `Runtime[AgentContext]` and reject anything else. Runtime context is not checkpointed and
+never enters messages, prompts or tool schemas (tests check messages, schemas and raw
+checkpoint storage).
+
+**MODEL node.** Checks `scope_digest`, calls `provider.invoke_chat(messages, tools=registry)`
+(no Ollama/Gemini branching), keeps the provider's original `AIMessage`, counts the model
+call, then records the result of `evaluate_model_turn()`:
+
+1. `invalid_tool_calls` → `agent_protocol_error` (nothing executed, no ToolMessage fabricated);
+2. parsed `tool_calls` → call ids present and unique, per-turn limit, total limit, final-round
+   rule → approved batch stored in `pending` (visible text may be empty);
+3. no tool calls → the Step-5 final-answer guard (empty, `{}`/`[]`, textual tool calls,
+   `<tool_call>` markup) → answer appended, END.
+
+A rejected turn is never appended to history. Conditional-edge functions only read the
+recorded decision (LangGraph edges cannot write state).
+
+**TOOLS node.** Executes the whole approved batch sequentially through `ToolExecutor`
+(registry allowlist, trusted runtime injection, argument checks, sanitised summaries,
+call-id checks, Step-3 logging) and then appends, in one update, the original AIMessage
+followed by its ToolMessages in request order. No model call happens inside a batch.
+
+**Limits.** The Step-5 settings stay authoritative (5 rounds / 8 total calls / 4 per turn,
+hard caps 10 / 20 / 8). LangGraph's `recursion_limit` (`2 × rounds + 3`) is only a defensive
+backstop; hitting it maps to `agent_limit_exceeded` / `recursion_limit`.
+
+**Result.** `CommerceGraphAssistant.run()` returns the unchanged Step-5 `AssistantResult`
+or raises the same `AssistantError`; graph state is never returned to callers.
+
+**Parity.** 30 scripted scenarios (no tool, single/multi/two-round batches, invalid and
+smuggled arguments, unknown tool, invalid tool calls, missing/duplicate ids, answer
+artifacts, every limit, provider errors and retries, invalid input) run through both runners
+and must match on outcome, counts, summaries, the exact messages sent to the model and DB
+sessions opened. Two further parity cases run on real PostgreSQL.
+
+### Checkpointing and threads (in-memory only)
+
+`build_commerce_graph(..., checkpointer=None)`: one-shot by default. With LangGraph's
+`InMemorySaver` a `thread_id` is required (1–64 chars `[A-Za-z0-9._-]`); without a
+checkpointer it is rejected.
+
+- **Tenant-scoped key.** The LangGraph `configurable.thread_id` is
+  `cg1-<sha256(tenant_id + ":" + thread_id)>`, so the same caller thread name under two
+  tenants is two unrelated threads.
+- **`scope_digest`.** The first model step binds a sha256 fingerprint of the trusted tenant to
+  the thread; a later run whose runtime context differs is refused
+  (`agent_thread_conflict`) before any model call. Raw tenant and thread IDs are never
+  checkpointed, logged or shown to the model (logs carry a 16-char `thread_key` prefix).
+- **Continuation.** A new run on an existing thread appends only the new user message (the
+  system prompt exists once per thread); `pending`, counters, summaries, seen call ids,
+  answer and error reset per run, and limits apply per run.
+
+- **Failed turns.** When a checkpointed run's user message is in the thread and the run
+  ends in an application/graph error (provider error, protocol error, limit, tool-result
+  protocol failure, recursion backstop), the runner closes the turn with a synthetic
+  `AIMessage` whose text is always `The previous request could not be completed.` It is
+  written with `update_state` as one extra checkpoint (earlier checkpoints of the run are
+  kept), is not a model call and does not change `model_calls`, and carries no error code,
+  exception text, provider/database detail or tenant data. The real code/detail stays in
+  graph state `error` and in the raised `AssistantError`, which is unchanged. If a run died
+  without closing its turn (e.g. a crash mid-batch), the next run on that thread inserts the
+  same marker before the new user message. Invalid input writes nothing; a thread bound to
+  another tenant is never written to; one-shot runs never touch checkpoint state.
+
+A continued `InMemorySaver` thread is **ephemeral, thread-scoped short-term conversation
+memory**: it survives multiple graph invocations only while that process and checkpointer
+are alive, is lost on process restart, is not durable production memory, and is not
+long-term or cross-thread user memory. Message history is not trimmed yet (pending P6).
+
+### Why a custom tool node instead of LangGraph's `ToolNode`?
+`ToolExecutor` is already the hardened capability boundary: registry allowlist, trusted
+tenant injection, argument validation, unknown-tool handling, sanitised summaries, call-id
+checks and safe logging. Replacing it now would move the security boundary for no gain.
+
+### Where approvals will go
+A later step can insert action-request → approval-interrupt → action-execution nodes on the
+`model → tools` path. No `interrupt()`, approvals or write tools exist yet.
+
+**Logging.** One `app.agent.graph` line per run: `runner=langgraph`, provider, model, prompt
+version, tenant/request id (trusted server log), `checkpointed`, `thread_key` prefix, model
+calls, tool-call count and names, invalid calls, `graph_steps`, outcome, detail, duration.
+Never prompts, messages, model output, tool payloads, graph state or reasoning.
+
+### Still missing after Step 6
+RAG, a durable (PostgreSQL) checkpointer, history trimming, human approval, write actions,
+evaluation and deeper observability.
 
 ## Open items
 
