@@ -1,7 +1,9 @@
-"""Developer-only harness: run the LangGraph commerce assistant (Step 6).
+"""Developer-only harness: run the LangGraph commerce assistant (Step 6; policy RAG Step 9).
 
     uv run python -m scripts.run_graph_assistant --tenant <uuid> --provider ollama \\
         --text "Show me order ORD-1001"
+    uv run python -m scripts.run_graph_assistant --tenant <uuid> --provider ollama \\
+        --text "What compensation applies to a shipment delayed by 10 days?"
 
     # same-process continuation on an EPHEMERAL in-memory thread:
     uv run python -m scripts.run_graph_assistant --tenant <uuid> --thread-id demo \\
@@ -11,6 +13,9 @@
   put into the prompt, graph messages or tool arguments.
 * --thread-id enables an InMemorySaver for THIS PROCESS ONLY. The thread and its history
   disappear when the process exits; nothing is written to a database or disk.
+* Policy questions use semantic retrieval over the configured embedding profile (run
+  ``scripts.embed_policies`` first); the result lists retrieval summaries (no query text)
+  and the citations the answer used.
 * stdout: application-level result JSON (one object, or a list with one per --text).
   stderr: safe log lines / error envelope. Never prints keys, prompts, raw model output,
   reasoning, graph state or raw tool payloads. Gemini: synthetic demo data only.
@@ -28,6 +33,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from app.agent.assistant import AssistantError
 from app.agent.context import create_agent_context
 from app.agent.graph import CommerceGraphAssistant
+from app.agent.graph.builder import default_policy_retriever
 from app.agent.llm import LLMError, get_llm_provider
 from app.agent.llm.config import SUPPORTED_PROVIDERS
 from app.core.errors import TenantNotFoundError
@@ -38,6 +44,11 @@ EPHEMERAL_NOTE = (
     "note: --thread-id uses an in-memory checkpointer; the thread exists only while this "
     "process runs and is lost when it exits."
 )
+
+
+def build_policy_retriever():
+    """Semantic policy retriever (read-only sessions, configured embedding profile)."""
+    return default_policy_retriever()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -74,7 +85,9 @@ def main(argv: list[str] | None = None) -> int:
         checkpointer = InMemorySaver() if ns.thread_id is not None else None
         if checkpointer is not None:
             print(EPHEMERAL_NOTE, file=sys.stderr)
-        assistant = CommerceGraphAssistant(provider, checkpointer=checkpointer)
+        assistant = CommerceGraphAssistant(
+            provider, checkpointer=checkpointer, retriever=build_policy_retriever()
+        )
         for turn, text in enumerate(ns.text, start=1):
             try:
                 result = assistant.run(text, context, thread_id=ns.thread_id)
@@ -88,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
                         "invalid_tool_calls": [
                             c.model_dump(mode="json") for c in exc.invalid_tool_calls
                         ],
+                        "retrievals": [r.model_dump(mode="json") for r in exc.retrievals],
                     }
                 )
             results.append(result.model_dump(mode="json"))

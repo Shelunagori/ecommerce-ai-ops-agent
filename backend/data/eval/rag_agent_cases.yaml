@@ -1,0 +1,107 @@
+# Step-9 RAG / agent evaluation cases (orchestration + grounding, NOT retrieval ranking).
+#
+# Separate from policy_retrieval_cases.yaml (Step 7/8 retrieval benchmark, frozen).
+# Every case has an explicit `as_of`: the trusted evaluation clock the retriever uses when
+# the model omits as_of. Committed metrics never depend on the wall clock.
+#
+# Expectations are deterministic and apply to the LAST turn of a case:
+#   retrieval_required       the model must call search_policy_knowledge (and it must run)
+#   model_as_of              the date an ideal model extracts from the question (historical)
+#   expected_sources         policy://<key>/v<n> documents that must be retrieved and cited
+#   forbidden_sources        documents that must never be retrieved or cited
+#   expected_commerce_tools  commerce tools (in order) the turn must use
+#   expect_no_result         retrieval returns no eligible policy; answer must cite nothing
+# Exact prose is never graded.
+version: 1
+cases:
+  - id: bp-delay-current
+    tenant: bluepeak-retail
+    as_of: 2026-09-01
+    turns: ["What compensation applies to a delayed shipment?"]
+    retrieval_required: true
+    expected_sources: ["policy://delayed-shipment-compensation/v2"]
+    forbidden_sources: ["policy://delayed-shipment-compensation/v1"]
+    isolation_group: delay-same-question
+  - id: ns-delay-current
+    tenant: northstar-commerce
+    as_of: 2026-09-01
+    turns: ["What compensation applies to a delayed shipment?"]
+    retrieval_required: true
+    expected_sources: ["policy://delayed-shipment-compensation/v1"]
+    # v2 of this document exists only for BluePeak.
+    forbidden_sources: ["policy://delayed-shipment-compensation/v2"]
+    isolation_group: delay-same-question
+  - id: bp-delay-historical
+    tenant: bluepeak-retail
+    as_of: 2026-09-01
+    turns: ["What compensation applied to a delayed shipment on 10 June 2026?"]
+    retrieval_required: true
+    model_as_of: 2026-06-10
+    expected_sources: ["policy://delayed-shipment-compensation/v1"]
+    forbidden_sources: ["policy://delayed-shipment-compensation/v2"]
+  - id: ns-refund-current
+    tenant: northstar-commerce
+    as_of: 2026-09-01
+    turns: ["How many business days does a refund take?"]
+    retrieval_required: true
+    expected_sources: ["policy://refund-policy/v2"]
+    forbidden_sources: ["policy://refund-policy/v1"]
+  - id: ns-refund-historical
+    tenant: northstar-commerce
+    as_of: 2026-09-01
+    turns: ["How many business days did a refund take on 10 June 2026?"]
+    retrieval_required: true
+    model_as_of: 2026-06-10
+    expected_sources: ["policy://refund-policy/v1"]
+    forbidden_sources: ["policy://refund-policy/v2"]
+  - id: bp-return-window
+    tenant: bluepeak-retail
+    as_of: 2026-09-01
+    turns: ["How many days do I have to return an item?"]
+    retrieval_required: true
+    expected_sources: ["policy://returns-policy/v1"]
+  - id: ns-cancellation
+    tenant: northstar-commerce
+    as_of: 2026-09-01
+    turns: ["Can I cancel an order, and what is the cancellation window?"]
+    retrieval_required: true
+    expected_sources: ["policy://order-cancellation/v1"]
+  - id: ns-no-applicable-policy
+    tenant: northstar-commerce
+    as_of: 2026-09-01
+    # Before any Northstar policy took effect (earliest: 2026-01-01).
+    turns: ["What was the refund policy on 1 December 2025?"]
+    retrieval_required: true
+    model_as_of: 2025-12-01
+    expect_no_result: true
+  - id: ns-order-commerce-only
+    tenant: northstar-commerce
+    as_of: 2026-09-01
+    turns: ["Show me order ORD-1001"]
+    retrieval_required: false
+    expected_commerce_tools:
+      - {tool: get_order, args: {order_number: ORD-1001}}
+  - id: ns-mixed-shipment-policy
+    tenant: northstar-commerce
+    as_of: 2026-09-01
+    turns: ["Where is shipment SHP-1003, and what compensation applies if it is delayed?"]
+    retrieval_required: true
+    expected_sources: ["policy://delayed-shipment-compensation/v1"]
+    forbidden_sources: ["policy://delayed-shipment-compensation/v2"]
+    expected_commerce_tools:
+      - {tool: get_shipment, args: {shipment_number: SHP-1003}}
+  - id: bp-followup-fresh-retrieval
+    tenant: bluepeak-retail
+    as_of: 2026-09-01
+    # Turn 1 retrieves; the follow-up must retrieve again (old citations are stale).
+    turns:
+      - "What compensation applies to a delayed shipment?"
+      - "Does the same compensation apply to a second delayed parcel?"
+    retrieval_required: true
+    expected_sources: ["policy://delayed-shipment-compensation/v2"]
+    forbidden_sources: ["policy://delayed-shipment-compensation/v1"]
+  - id: bp-greeting
+    tenant: bluepeak-retail
+    as_of: 2026-09-01
+    turns: ["Hello!"]
+    retrieval_required: false

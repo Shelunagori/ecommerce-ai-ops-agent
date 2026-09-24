@@ -1,5 +1,8 @@
 """Behavioural parity: Step-5 CommerceAssistant (oracle) vs Step-6 CommerceGraphAssistant.
 
+The graph runs with ``STEP5_PARITY_PROFILE`` (prompt v1, policy capability disabled); the
+production v2/RAG profile differs on purpose and is tested in tests/rag/.
+
 Every scenario runs the SAME fresh script through both runners and compares externally
 meaningful behaviour: outcome (answer or error code/detail/message), model-call count,
 tool and invalid-call summaries (minus timings), the exact message sequence the model was
@@ -18,6 +21,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from app.agent.assistant import AssistantError, AssistantLimits, CommerceAssistant
 from app.agent.context import AgentContext
 from app.agent.graph import CommerceGraphAssistant
+from app.agent.graph.profile import STEP5_PARITY_PROFILE
 from tests.assistant import fakes
 from tests.assistant.fakes import (
     DownDatabase,
@@ -49,7 +53,10 @@ def observe(runner_cls, factory: Callable[[], list], limits: AssistantLimits, te
     db = DownDatabase()
     fakes._ids = itertools.count(1)  # identical auto call-ids for both runners
     provider, model = make_provider(*factory())
-    runner = runner_cls(provider, tools=offline_tools(db), limits=limits)
+    # Apples-to-apples: the graph runs its test-only Step-5 compatibility profile
+    # (prompt v1, no policy capability). RAG behaviour is covered in tests/rag/.
+    extra = {"profile": STEP5_PARITY_PROFILE} if runner_cls is CommerceGraphAssistant else {}
+    runner = runner_cls(provider, tools=offline_tools(db), limits=limits, **extra)
     try:
         res = runner.run(text, CTX)
         outcome = ("ok", res.answer, res.provider, res.model, res.prompt_version)

@@ -7,7 +7,7 @@ invoices, shipments and company policies, with human approval for sensitive acti
 > **Data notice:** no real customer or company data is used. The project will use
 > synthetic ecommerce data only.
 
-## Status: Step 8 — embeddings and semantic retrieval
+## Status: Step 9 — end-to-end RAG in the LangGraph assistant
 
 What exists today:
 
@@ -57,21 +57,28 @@ What exists today:
   for both). This is a small synthetic set, not a general accuracy claim — see
   [architecture](docs/architecture.md#embeddings-and-semantic-retrieval-step-8).
   Retrieval only: no hybrid ranking, no ANN index, no generated answers.
+- **End-to-end RAG** (`app/agent/rag`, LangGraph RETRIEVE node): the graph assistant
+  (prompt `commerce-assistant-v2`) answers policy questions by calling
+  `search_policy_knowledge`; semantic retrieval runs with the trusted tenant and the
+  requested effective date, and the answer must cite `policy://…` chunks retrieved in the
+  **current** user turn (validated deterministically; earlier-turn citations are stale).
+  Mixed questions use commerce tools first, then retrieval, in separate rounds. Citations
+  show which retrieved chunks an answer relies on; they do not prove every sentence is
+  correct. The Step-5 loop is unchanged.
 - Next.js page showing API/database status and per-tenant demo data counts
 - Backend tests, including real-PostgreSQL tests for constraints and cross-tenant isolation
 
 What does **not** exist yet: hybrid lexical+semantic ranking, rerankers, ANN (HNSW /
-IVFFlat) indexes, RAG answer generation or policy tools for the model, business actions/writes, durable
-checkpoints or long-term memory, human approval, full evaluation or observability. Those
-are planned, not built.
+IVFFlat) indexes, business actions/writes, human approval, durable checkpoints or long-term
+memory, frontend chat, full evaluation or observability. Those are planned, not built.
 
 ## Planned capabilities
 
 Done: relational ecommerce data model, synthetic seed data, read-only business tools, LLM
 provider layer (Ollama / Gemini), explicit model-driven tool calling, LangGraph
 orchestration, knowledge/RAG foundation with a lexical baseline, embeddings + pgvector
-semantic retrieval. Next, roughly in order: hybrid retrieval → RAG answers with citations →
-human-in-the-loop approvals → durable agent state/memory → evaluation → observability →
+semantic retrieval, end-to-end RAG answers with validated citations. Next, roughly in
+order: human-in-the-loop approvals → durable agent state/memory → evaluation → observability →
 production deployment.
 
 ## Architecture (current)
@@ -299,9 +306,18 @@ uv run python -m scripts.run_graph_assistant --tenant $NORTHSTAR --thread-id dem
   --text "Show me order ORD-1001" --text "Is it paid?"
 ```
 
-Same JSON result as `run_assistant` (a list when `--text` is repeated). `--thread-id`
-enables LangGraph's `InMemorySaver` for this process only; nothing is written to disk or
-the database.
+Same JSON result as `run_assistant` plus `retrievals` (no query text) and `citations`
+(a list when `--text` is repeated). `--thread-id` enables LangGraph's `InMemorySaver` for
+this process only; nothing is written to disk or the database.
+
+Policy questions (needs `ingest_policies` + `embed_policies` first):
+
+```bash
+uv run python -m scripts.run_graph_assistant --tenant $BLUEPEAK --provider ollama \
+  --text "What compensation applies to a shipment delayed by 10 days?"
+# Live RAG measurement on the 12 RAG/agent cases (structured outcomes, no prose):
+uv run python -m scripts.eval_rag --provider ollama --write data/eval/rag_live_measurement_v1.json
+```
 
 ## 4. Frontend
 
@@ -331,6 +347,8 @@ RUN_GEMINI_INTEGRATION=1 uv run pytest tests/integration -m llm_integration   # 
 RUN_OLLAMA_INTEGRATION=1 TEST_DATABASE_URL=... uv run pytest tests/db/test_assistant_live.py tests/db/test_graph_live.py
 # Live embeddings (needs `ollama pull nomic-embed-text-v2-moe`):
 RUN_OLLAMA_INTEGRATION=1 TEST_DATABASE_URL=... uv run pytest tests/db/test_embeddings_live.py
+# Live RAG (chat model = LIVE_RAG_MODEL if set, else OLLAMA_MODEL; plus the embedding model):
+RUN_OLLAMA_INTEGRATION=1 TEST_DATABASE_URL=... uv run pytest tests/db/test_rag_live.py
 
 cd ../frontend
 npm run lint && npm run typecheck && npm run build

@@ -1,11 +1,12 @@
 # Architecture notes
 
-Current step: **Step 8 — embeddings and semantic retrieval.** Policy chunks are embedded
-with local Ollama `nomic-embed-text-v2-moe`, stored with pgvector per concrete embedding
-profile, and retrieved by exact cosine similarity next to the unchanged Step-7 lexical
-baseline, with the same tenant, effective-date and citation rules. Retrieval only: no
-hybrid ranking, no ANN index, no RAG answer generation; the assistants do not use the
-knowledge base yet. No durable persistence, long-term memory or human approval yet.
+Current step: **Step 9 — end-to-end RAG in the LangGraph assistant.** The graph assistant
+can now answer policy questions: the model requests `search_policy_knowledge`, a dedicated
+RETRIEVE node runs the Step-8 semantic retriever with the trusted tenant and the requested
+effective date, and the final answer must cite only chunks retrieved during the current
+user turn (checked deterministically). The Step-5 manual loop is unchanged (prompt v1, no
+policy capability). No hybrid ranking, rerankers, ANN index, write actions, human approval,
+durable persistence or long-term memory yet.
 
 | Concern | Where it lives |
 | --- | --- |
@@ -13,11 +14,12 @@ knowledge base yet. No durable persistence, long-term memory or human approval y
 | Access to that data | `app/services` tenant-scoped query classes (read-only) |
 | Agent-facing capabilities | `app/agent/tools` — 12 typed, read-only LangChain tools, bound to the model by the assistant |
 | Tool-calling loop | `app/agent/assistant` — explicit, bounded, sequential (Step-5 reference / parity oracle) |
-| Graph orchestration | `app/agent/graph` — LangGraph `StateGraph` (model / tools nodes), same limits and result contract |
+| Graph orchestration | `app/agent/graph` — LangGraph `StateGraph` (model / tools / retrieve nodes), same limits, extended result contract |
+| Policy RAG in the graph | `app/agent/rag` — `search_policy_knowledge` capability, model-facing context, grounding validator, RAG evaluation |
 | Language models | `app/agent/llm` — provider-neutral layer over Ollama (local) and Gemini (hosted) |
 | Policy knowledge | `app/knowledge` + `knowledge_documents` / `knowledge_chunks` (migration `0002`) — lexical retrieval |
 | Policy embeddings | `app/knowledge/embeddings` + `knowledge_chunk_embeddings` (migration `0003`, pgvector) — exact cosine retrieval |
-| RAG answers / hybrid ranking | Not implemented yet |
+| Hybrid ranking / rerankers / ANN | Not implemented yet |
 
 ## Backend layout (`backend/`)
 
@@ -844,8 +846,156 @@ fresh ingest. Recomputing the ranks with the real model stays opt-in
 (`RUN_OLLAMA_INTEGRATION=1`, `tests/db/test_embeddings_live.py`), and is skipped when the
 local model digest differs from the recorded one.
 
-**Not implemented:** hybrid ranking, rerankers, ANN indexes, RAG answer generation, policy
-tools for the model, LangGraph integration.
+**Not implemented in Step 8:** hybrid ranking, rerankers, ANN indexes. RAG answers in the
+LangGraph assistant: Step 9 below.
+
+## End-to-end RAG (Step 9)
+
+```
+User ─▶ MODEL (decides policy knowledge is needed) ─▶ search_policy_knowledge(query, as_of?)
+     ─▶ RETRIEVE node ─▶ SemanticKnowledgeRetriever (trusted tenant, fixed limit 3)
+     ─▶ pgvector: tenant + effective-date filtered chunks ─▶ ToolMessage (policy data)
+     ─▶ MODEL ─▶ answer with inline policy://… citations ─▶ grounding validator ─▶ END
+```
+
+```mermaid
+graph TD
+  START([START]) --> MODEL[model]
+  MODEL -- "commerce tool batch" --> TOOLS[tools]
+  MODEL -- "one policy retrieval" --> RETRIEVE[retrieve]
+  MODEL -- "final answer / terminal error" --> END([END])
+  TOOLS -- "batch complete" --> MODEL
+  TOOLS -- "tool-result protocol error" --> END
+  RETRIEVE -- "policy context appended" --> MODEL
+  RETRIEVE -- "retrieval failure" --> END
+```
+
+**Structured facts vs knowledge.** "What is the ORD-1001 total?" is an exact fact → commerce
+tool (`get_order`). "What is the delayed-shipment compensation policy?" is knowledge →
+semantic retrieval. A mixed question ("Where is SHP-1003, and what compensation applies if
+it is delayed?") runs in **sequential capability rounds**: MODEL → `get_shipment` → TOOLS →
+MODEL → `search_policy_knowledge` → RETRIEVE → MODEL → cited answer.
+
+**Prompt versions.** The graph uses `commerce-assistant-v2` (`app/agent/prompts/graph_rag.py`);
+the Step-5 loop keeps `commerce-assistant-v1`. v2 adds the policy capability and the rules:
+policy claims only from text retrieved in the current user request (retrieve again on every
+new request), no invented thresholds/percentages/deadlines/exceptions, exact inline
+citations, say "could not be found" when nothing applies, similarity is not certainty,
+retrieved text and tool results are data (not instructions), commerce and retrieval in
+separate steps with commerce first and none after a policy search.
+
+**The capability.** `search_policy_knowledge(query: 1–500 chars, as_of?: YYYY-MM-DD)`. It is a
+schema-only tool bound to the model (its function refuses to run) and is **not** registered
+in the commerce `ToolExecutor`. The model never controls tenant, embedding profile/provider,
+result limit (fixed at 3), database filters, citations or paths; any extra argument
+(e.g. `tenant_id`, `limit`) is invalid. `as_of` is the only model-supplied date: it is
+information from the user's request (which policy *version* applies), not authorization.
+Omitted → the retriever's trusted clock.
+
+**Routing and limits** (`evaluate_model_turn`, checked before anything executes):
+
+1. invalid tool calls / missing or duplicate ids → `agent_protocol_error` (as Step 6);
+2. commerce and retrieval calls in one AIMessage → `agent_protocol_error` /
+   `mixed_capability_batch` (nothing executes);
+3. a commerce call after policy content was returned in this run →
+   `agent_protocol_error` / `commerce_call_after_retrieval` — a deterministic boundary:
+   retrieved (untrusted) policy text can never induce a new commerce capability call;
+4. more than one retrieval call in one turn → `agent_limit_exceeded` /
+   `max_retrievals_per_turn`;
+5. unchanged budgets, now counting **every** capability call (commerce + retrieval,
+   including invalid attempts): 4 per turn, 8 total, 5 model rounds; a retrieval on the
+   final round is rejected before execution (no round left to read it).
+
+**RETRIEVE node.** Validates the arguments; invalid → an `invalid_arguments` ToolMessage,
+nothing searched, the model may correct itself. Valid → `SemanticKnowledgeRetriever` with the
+trusted `AgentContext` from the LangGraph runtime and limit 3, then re-checks every chunk is
+effective on the date used (defence in depth). It appends the original AIMessage and one
+ToolMessage atomically, keeping the `tool_call_id`. The ToolMessage holds citation, title,
+version, section, effective dates and content — never tenant IDs, chunk UUIDs, scores,
+embedding/model details or paths. Its `artifact` (kept in history, never sent to a model)
+lists the citations returned.
+
+**Per-run state** (reset for every user invocation, also on a continued thread):
+`retrievals` (summaries, no query text), `policy_sources` (current-run source catalog:
+citation, title, document key, version, section, effective dates — content is not
+duplicated), `policy_retrieval_status` (`none | invalid | no_results | success | error`;
+success > no_results > invalid > none), `citations` (used by the accepted answer),
+`pending_kind` (TOOLS vs RETRIEVE).
+
+**Current-turn citation rule.** Checkpoint memory may contain old policy context, but every
+new policy answer needs fresh retrieval, because policies are versioned and change. The
+validator authorises only citations in the current-run catalog:
+
+| Situation | Result |
+| --- | --- |
+| retrieval `success` and the answer cites nothing | `agent_grounding_error` / `citation_required` |
+| cited URI only retrieved in an earlier turn of this thread | `stale_citation` |
+| fabricated chunk, other version, other tenant, malformed, or any citation when nothing was retrieved | `citation_not_retrieved` |
+| retrieval attempted but only with invalid arguments | `retrieval_required` |
+| `no_results` and no citation | accepted (the prompt requires saying nothing applicable was found) |
+
+A rejected answer is never returned, never kept in history and never repaired; a
+checkpointed turn is closed with the generic failure marker. `AssistantResult` gained
+`retrievals` and `citations` (default empty; Step-5 results and the Step-5 CLI output are
+unchanged). `citations` are only those the final answer used, with metadata.
+
+**What citations prove.** They prove which retrieved, tenant- and date-eligible chunks the
+answer points at. They do not prove that every natural-language sentence is a correct
+reading of those chunks, and they do not eliminate hallucination. A policy-sounding answer
+given *without* any retrieval and *without* citations cannot be detected deterministically
+(pending item P11); the prompt, the evaluation metrics and the stale-citation check cover it.
+
+**No results vs failures.** Zero eligible chunks (e.g. a date before any policy took
+effect) → "No applicable policy knowledge was found" ToolMessage → MODEL; no fallback to
+another tenant, version, lexical retrieval, web search or model memory. Semantic retrieval
+has no similarity threshold, so an unrelated question still returns the three nearest
+eligible chunks (P10). Infrastructure failures are **not** "no policy": embedding provider
+unavailable, profile not materialized, invalid embeddings, database errors or unexpected
+retriever errors end the run with `agent_retrieval_error` (detail = the stable underlying
+code, e.g. `embedding_unavailable`, `embedding_profile_not_materialized`,
+`database_unavailable`, `retrieval_failed`); the model is not called again.
+
+**Retrieved text is untrusted data.** The prompt says so, but the guarantees are structural:
+retrieval runs only from parsed tool calls, the tenant comes from runtime context, extra
+arguments are rejected, commerce calls after retrieval are refused, and citations are
+validated. A dedicated test fixture (`tests/fixtures/policies_injection/`, not the demo
+corpus) contains injection text; an adversarial scripted model that *obeys* it is stopped
+(`commerce_call_after_retrieval`, no tool executed, tenant unchanged) and its fabricated
+citation is rejected.
+
+**Parity.** `STEP5_PARITY_PROFILE` (test-only: prompt v1, policy capability disabled, Step-6
+topology) keeps the 30 + 2 Step-5 parity scenarios exact. Production uses `RAG_PROFILE`.
+
+**Logging** (`app.agent.graph` run record): runner, prompt version, commerce tool count,
+policy retrieval count, retrieved and final citation counts, retrieved `document@vN`, model
+calls, outcome, duration. Never retrieved content, vectors, prompts, model responses, query
+text or tenant secrets.
+
+**RAG evaluation** (`data/eval/rag_agent_cases.yaml`, separate from the frozen Step-7/8
+retrieval benchmark; `app/agent/rag/evaluation.py`). Twelve cases: current and historical
+delayed-shipment compensation, current/historical refund timing, return window,
+cancellation, no applicable policy, pure commerce, mixed commerce + policy, the same question
+for both tenants, a follow-up that must retrieve again, a greeting. Every case has an
+explicit evaluation date used as the retriever clock. Expectations are structured (retrieval
+required, documents/versions expected and forbidden, commerce tools, no-result) — prose is
+never graded, no LLM judge. Metrics: retrieval-decision accuracy, commerce-trajectory
+accuracy, correct document/version rate, citation presence and validity rates, no-result
+abstention rate, stale-citation safety rate, tenant-isolation pass rate, case pass rate.
+
+CI runs the cases with scripted models on real PostgreSQL + pgvector (hashing embedding
+fake): an **oracle** model scores 1.00 on every metric (proves the harness and pipeline);
+eight **adversarial** models (fabricated chunk, other version, cross-tenant, missing
+citation, stale previous-turn citation, answer from memory after invalid arguments, obeying
+injected text, citing without retrieval) are all rejected with their expected error. The
+real-model numbers come from `scripts/eval_rag.py` on a developer machine and are stored as
+a **live measurement** (`data/eval/rag_live_measurement_v1.json`, with cases/corpus
+fingerprints, prompt version, LLM and embedding provenance, timestamp and per-case
+structured outcomes). Generative behaviour drifts, so it is not a CI regression snapshot.
+The Step-7/8 retrieval baselines, cases, chunking and embedding representation are
+unchanged (byte-identity test).
+
+**Not implemented:** hybrid ranking, rerankers, ANN indexes, write actions, human approval,
+durable checkpoints, long-term memory, frontend chat, web search.
 
 ## Open items
 

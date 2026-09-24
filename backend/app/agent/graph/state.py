@@ -27,6 +27,13 @@ RUN_RESET: dict[str, Any] = {
     "seen_tool_call_ids": [],
     "answer": None,
     "error": None,
+    # Step 9 (policy RAG). Current-run only: a continued thread starts every run with an
+    # empty source catalog, so earlier-turn citations never ground a new answer.
+    "pending_kind": None,
+    "retrievals": [],
+    "policy_sources": [],
+    "policy_retrieval_status": "none",
+    "citations": [],
 }
 
 
@@ -85,6 +92,20 @@ class CommerceGraphState(TypedDict, total=False):
     seen_tool_call_ids: list[str]
     answer: str | None
     error: GraphError | None
+    # --- Step 9: policy RAG (all per-run, reset by RUN_RESET) ---
+    # Which node consumes ``pending``: "commerce" (TOOLS) or "retrieval" (RETRIEVE).
+    pending_kind: str | None
+    # RetrievalSummary.model_dump(mode="json") per model-requested retrieval (no query text).
+    retrievals: list[dict[str, Any]]
+    # Current-run source catalog: citation, title, document_key, version, section,
+    # effective_from, effective_to (plain JSON values). Chunk CONTENT is not duplicated here:
+    # it lives only in the retrieval ToolMessage the model received.
+    policy_sources: list[dict[str, Any]]
+    # none | invalid | no_results | success | error  (precedence: success > no_results >
+    # invalid > none; error is terminal).
+    policy_retrieval_status: str
+    # Citations the accepted final answer used (subset of policy_sources, in answer order).
+    citations: list[str]
 
 
 def validate_thread_id(thread_id: Any) -> str:

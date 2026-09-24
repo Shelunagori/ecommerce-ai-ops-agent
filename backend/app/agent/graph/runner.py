@@ -12,6 +12,9 @@
 * Failed turns on a checkpointed thread are closed with a generic synthetic assistant
   message (``FAILURE_MARKER_TEXT``) so the thread never holds an unanswered user message;
   the caller still gets the original ``AssistantError``. One-shot runs are unaffected.
+* Policy questions (Step 9): the RETRIEVE node runs the policy retriever with the trusted
+  context; the final answer is validated against the CURRENT run's source catalog.
+  ``AssistantResult.retrievals`` / ``.citations`` carry safe metadata (no query text).
 * Raises the Step-5 ``AssistantError`` on failure; returns ``AssistantResult`` on success.
   Graph state is never returned to callers.
 """
@@ -19,7 +22,7 @@
 import logging
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage
@@ -30,9 +33,17 @@ from langgraph.types import Checkpointer
 
 from app.agent.assistant.errors import AssistantError
 from app.agent.assistant.limits import AssistantLimits
-from app.agent.assistant.result import AssistantResult, InvalidToolCallSummary, ToolCallSummary
+from app.agent.assistant.result import (
+    AssistantResult,
+    InvalidToolCallSummary,
+    PolicyCitation,
+    RetrievalSummary,
+    ToolCallSummary,
+)
 from app.agent.context import AgentContext
 from app.agent.graph.builder import build_commerce_graph, recursion_limit_for
+from app.agent.graph.nodes import PolicyRetriever
+from app.agent.graph.profile import RAG_PROFILE, GraphProfile
 from app.agent.graph.routing import MODEL
 from app.agent.graph.state import (
     RUN_RESET,
@@ -42,7 +53,7 @@ from app.agent.graph.state import (
     turn_is_open,
 )
 from app.agent.llm import LLMProvider
-from app.agent.prompts import assistant as assistant_prompt
+from app.agent.rag.capability import SEARCH_POLICY_KNOWLEDGE
 from app.agent.tools import build_commerce_tools
 
 logger = logging.getLogger("app.agent.graph")
@@ -59,13 +70,24 @@ class CommerceGraphAssistant:
         tools: Sequence[BaseTool] | None = None,
         limits: AssistantLimits | None = None,
         checkpointer: Checkpointer = None,
+        retriever: PolicyRetriever | Callable[[], PolicyRetriever] | None = None,
+        profile: GraphProfile = RAG_PROFILE,
     ) -> None:
+        """``retriever``: policy retriever (or zero-argument factory) for the RETRIEVE node;
+        default: the semantic retriever over the configured embedding profile, built lazily.
+        ``profile``: ``RAG_PROFILE`` (production). ``STEP5_PARITY_PROFILE`` is test-only."""
         self._provider = provider
         self._tools = tuple(tools if tools is not None else build_commerce_tools())
         self._limits = limits or AssistantLimits.from_settings()
         self._checkpointed = checkpointer is not None
+        self._profile = profile
         self._graph = build_commerce_graph(
-            provider, tools=self._tools, limits=self._limits, checkpointer=checkpointer
+            provider,
+            tools=self._tools,
+            limits=self._limits,
+            checkpointer=checkpointer,
+            profile=profile,
+            retriever=retriever,
         )
 
     @property
@@ -73,8 +95,13 @@ class CommerceGraphAssistant:
         return self._graph
 
     @property
+    def profile(self) -> GraphProfile:
+        return self._profile
+
+    @property
     def bound_tool_names(self) -> tuple[str, ...]:
-        return tuple(t.name for t in self._tools)
+        extra = (SEARCH_POLICY_KNOWLEDGE,) if self._profile.policy_knowledge else ()
+        return (*(t.name for t in self._tools), *extra)
 
     def thread_config(self, context: AgentContext, thread_id: str) -> dict[str, Any]:
         """LangGraph config for a tenant-scoped thread (raises ValueError for a bad ID)."""
@@ -108,6 +135,7 @@ class CommerceGraphAssistant:
             exc.model_calls = exc.model_calls or values.get("model_calls", 0)
             exc.tool_calls = exc.tool_calls or _tool_summaries(values)
             exc.invalid_tool_calls = exc.invalid_tool_calls or _invalid_summaries(values)
+            exc.retrievals = exc.retrievals or _retrieval_summaries(values)
             closed = None
             if turn_id is not None:
                 closed = self._close_failed_turn(config, context, turn_id, exc)
@@ -157,13 +185,14 @@ class CommerceGraphAssistant:
         return config
 
     def _input(self, text: str, config: dict[str, Any], context: AgentContext) -> dict[str, Any]:
+        build_messages = self._profile.prompt.build_messages
         if not self._checkpointed:
-            return {**RUN_RESET, "messages": assistant_prompt.build_messages(text)}
+            return {**RUN_RESET, "messages": build_messages(text)}
         turn = HumanMessage(content=text, id=f"turn-{uuid.uuid4().hex}")
         current = self._graph.get_state(config).values
         history = current.get("messages", [])
         if not history:
-            return {**RUN_RESET, "messages": [*assistant_prompt.build_messages(text)[:-1], turn]}
+            return {**RUN_RESET, "messages": [*build_messages(text)[:-1], turn]}
         messages: list[BaseMessage] = [turn]  # continued thread: system prompt once
         if turn_is_open(history) and current.get("scope_digest") == scope_digest(context.tenant_id):
             # A previous run died without closing its turn (e.g. process crash mid-batch):
@@ -182,10 +211,12 @@ class CommerceGraphAssistant:
             answer=answer,
             provider=self._provider.info.provider,
             model=self._provider.info.model,
-            prompt_version=assistant_prompt.PROMPT_VERSION,
+            prompt_version=self._profile.prompt_version,
             model_calls=values.get("model_calls", 0),
             tool_calls=_tool_summaries(values),
             duration_ms=round((time.perf_counter() - started) * 1000, 1),
+            retrievals=_retrieval_summaries(values),
+            citations=_final_citations(values),
         )
 
     def _log(
@@ -201,19 +232,29 @@ class CommerceGraphAssistant:
         # Identifiers and counts only: never prompts, messages, model output, tool payloads,
         # graph state or the caller's raw thread ID.
         tool_calls = values.get("tool_calls", [])
+        retrievals = values.get("retrievals", [])
         model_calls = values.get("model_calls", 0)
         fields: dict[str, Any] = {
             "runner": RUNNER,
             "provider": self._provider.info.provider,
             "model": self._provider.info.model,
-            "prompt_version": assistant_prompt.PROMPT_VERSION,
+            "prompt_version": self._profile.prompt_version,
             "tenant_id": str(context.tenant_id),
             "checkpointed": self._checkpointed,
             "model_calls": model_calls,
             "tool_call_count": len(tool_calls),
             "tool_names": [c.get("tool") for c in tool_calls],
             "invalid_tool_calls": len(values.get("invalid_tool_calls", [])),
-            "graph_steps": model_calls + len({c.get("round") for c in tool_calls}),
+            "graph_steps": model_calls
+            + len({c.get("round") for c in tool_calls})
+            + len(retrievals),
+            "commerce_tool_count": len(tool_calls),
+            "policy_retrieval_count": len(retrievals),
+            "retrieved_citation_count": len(
+                {c for r in retrievals for c in r.get("citations", [])}
+            ),
+            "final_citation_count": len(values.get("citations", [])),
+            "retrieved_documents": _retrieved_documents(values),
             "outcome": outcome,
             "duration_ms": round((time.perf_counter() - started) * 1000, 1),
         }
@@ -238,3 +279,21 @@ def _tool_summaries(values: dict[str, Any]) -> list[ToolCallSummary]:
 
 def _invalid_summaries(values: dict[str, Any]) -> list[InvalidToolCallSummary]:
     return [InvalidToolCallSummary.model_validate(c) for c in values.get("invalid_tool_calls", [])]
+
+
+def _retrieval_summaries(values: dict[str, Any]) -> list[RetrievalSummary]:
+    return [RetrievalSummary.model_validate(r) for r in values.get("retrievals", [])]
+
+
+def _final_citations(values: dict[str, Any]) -> list[PolicyCitation]:
+    """Only the citations the accepted answer used, with their catalog metadata."""
+    catalog = {s["citation"]: s for s in values.get("policy_sources", [])}
+    return [PolicyCitation.model_validate(catalog[c]) for c in values.get("citations", [])]
+
+
+def _retrieved_documents(values: dict[str, Any]) -> list[str]:
+    """Distinct ``document_key@vN`` of the current-run catalog (identifiers only)."""
+    seen: dict[str, None] = {}
+    for s in values.get("policy_sources", []):
+        seen.setdefault(f"{s['document_key']}@v{s['version']}", None)
+    return list(seen)

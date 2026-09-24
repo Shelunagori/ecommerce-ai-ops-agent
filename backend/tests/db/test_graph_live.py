@@ -51,7 +51,8 @@ def test_live_graph_order_lookup(provider_name, live_tools, tenant_a):
     assistant = CommerceGraphAssistant(
         get_llm_provider(provider=provider_name), tools=live_tools, limits=AssistantLimits()
     )
-    assert assistant.bound_tool_names == COMMERCE_TOOL_NAMES
+    # Step 9: the production graph also binds the policy capability.
+    assert assistant.bound_tool_names == (*COMMERCE_TOOL_NAMES, "search_policy_knowledge")
     try:
         result = assistant.run("Show me order ORD-1001", ctx)
     except AssistantError as exc:

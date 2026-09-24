@@ -242,6 +242,15 @@ def _same_tag(listed: str, configured: str) -> bool:
         return False
 
 
+def resolve_ollama_model_digest(model: str, *, base_url: str, timeout_seconds: float = 10.0) -> str:
+    """Digest of any locally pulled Ollama tag (e.g. the CHAT model, for evaluation
+    provenance). Same tag lookup as the embedding profile; no embedding request is made."""
+    probe = OllamaEmbeddingProvider(
+        model, base_url=base_url, dimensions=1, timeout_seconds=timeout_seconds, max_retries=0
+    )
+    return probe.resolve_model_digest()
+
+
 def get_embedding_provider(settings: Any = None) -> OllamaEmbeddingProvider:
     """Build the configured provider from trusted settings (no network)."""
     if settings is None:

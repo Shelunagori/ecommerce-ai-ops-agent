@@ -1,8 +1,9 @@
-"""LangGraph StateGraph version of the commerce assistant (Step 6).
+"""LangGraph StateGraph version of the commerce assistant (Step 6; policy RAG in Step 9).
 
 Built alongside the Step-5 ``CommerceAssistant`` manual loop, which stays as the reference
-implementation and parity oracle. No RAG, approvals/interrupts, write tools or durable
-checkpointing here.
+implementation and parity oracle (compared through the test-only ``STEP5_PARITY_PROFILE``).
+Production uses ``RAG_PROFILE``: prompt ``commerce-assistant-v2`` plus the RETRIEVE node for
+``search_policy_knowledge``. No approvals/interrupts, write tools or durable checkpointing.
 """
 
 from app.agent.graph.builder import build_commerce_graph

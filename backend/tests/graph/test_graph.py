@@ -16,6 +16,7 @@ from app.agent.assistant.executor import ToolExecutionError, ToolExecutor
 from app.agent.context import AgentContext
 from app.agent.graph import CommerceGraphAssistant, build_commerce_graph
 from app.agent.graph.builder import recursion_limit_for
+from app.agent.graph.profile import STEP5_PARITY_PROFILE
 from app.agent.graph.routing import (
     MODEL,
     TOOLS,
@@ -24,7 +25,8 @@ from app.agent.graph.routing import (
     route_after_tools,
 )
 from app.agent.graph.state import RUN_RESET
-from app.agent.prompts import assistant as assistant_prompt
+from app.agent.prompts import graph_rag as assistant_prompt
+from app.agent.rag.capability import SEARCH_POLICY_KNOWLEDGE
 from app.agent.tools import COMMERCE_TOOL_NAMES
 from tests.assistant.fakes import (
     DownDatabase,
@@ -53,9 +55,15 @@ def build(db, *script, limits=None, **kw):
 
 
 # --- topology ----------------------------------------------------------------------------------
+BOUND = (*COMMERCE_TOOL_NAMES, SEARCH_POLICY_KNOWLEDGE)  # Step 9: + policy capability
+
+
 def test_graph_topology():
+    """Step-6 topology (policy capability disabled); the RAG topology: tests/rag/."""
     provider, _ = make_provider()
-    g = build_commerce_graph(provider, tools=offline_tools(DownDatabase()), limits=D).get_graph()
+    g = build_commerce_graph(
+        provider, tools=offline_tools(DownDatabase()), limits=D, profile=STEP5_PARITY_PROFILE
+    ).get_graph()
     assert set(g.nodes) == {"__start__", MODEL, TOOLS, "__end__"}
     assert {(e.source, e.target, e.conditional) for e in g.edges} == {
         ("__start__", MODEL, False),
@@ -171,8 +179,8 @@ def test_route_functions_only_read_recorded_state():
 def test_model_is_bound_exactly_to_the_registry(db):
     assistant, model = build(db, ai_tools(call("get_order", order_number="ORD-1")), ai_text("x"))
     assistant.run("x", CTX)
-    assert [i.tool_names for i in model.invocations] == [COMMERCE_TOOL_NAMES] * 2
-    assert assistant.bound_tool_names == COMMERCE_TOOL_NAMES
+    assert [i.tool_names for i in model.invocations] == [BOUND] * 2
+    assert assistant.bound_tool_names == BOUND
 
 
 def test_messages_and_tool_schemas_never_carry_tenant_context(db):
@@ -309,7 +317,7 @@ def test_graph_recursion_limit_is_mapped_to_a_safe_limit_error(db, monkeypatch):
 
 def test_default_graph_assistant_uses_build_commerce_tools_and_settings_limits():
     provider, _ = make_provider(ai_text("x"))
-    assert CommerceGraphAssistant(provider).bound_tool_names == COMMERCE_TOOL_NAMES
+    assert CommerceGraphAssistant(provider).bound_tool_names == BOUND
 
 
 # --- logging ------------------------------------------------------------------------------------
@@ -335,7 +343,7 @@ def test_run_summary_log_contains_only_safe_fields(db, caplog):
     assert (rec.provider, rec.model, rec.prompt_version, rec.request_id) == (
         "fake",
         "scripted",
-        "commerce-assistant-v1",
+        "commerce-assistant-v2",
         "req-graph",
     )
     assert not hasattr(rec, "thread_key")

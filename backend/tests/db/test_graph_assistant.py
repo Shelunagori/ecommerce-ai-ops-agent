@@ -20,6 +20,7 @@ import app.db.session as db_session_module
 from app.agent.assistant import AssistantLimits, CommerceAssistant
 from app.agent.context import AgentContext
 from app.agent.graph import CommerceGraphAssistant
+from app.agent.graph.profile import STEP5_PARITY_PROFILE
 from app.agent.tools import ToolDependencies, build_commerce_tools
 from scripts import run_graph_assistant
 from tests.assistant.fakes import ai_text, ai_tools, call, make_provider
@@ -225,7 +226,8 @@ def test_parity_with_step5_on_real_data(real_tools, ctx_a, script):
     outs = []
     for cls in (CommerceAssistant, CommerceGraphAssistant):
         provider, model = make_provider(*script())
-        result = cls(provider, tools=real_tools, limits=AssistantLimits()).run("q", ctx_a)
+        extra = {"profile": STEP5_PARITY_PROFILE} if cls is CommerceGraphAssistant else {}
+        result = cls(provider, tools=real_tools, limits=AssistantLimits(), **extra).run("q", ctx_a)
         outs.append(
             (
                 result.answer,
@@ -253,6 +255,8 @@ RESULT_KEYS = {
     "model_calls",
     "tool_calls",
     "duration_ms",
+    "retrievals",  # Step 9 (empty for commerce-only questions)
+    "citations",
 }
 
 

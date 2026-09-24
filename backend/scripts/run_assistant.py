@@ -78,7 +78,9 @@ def main(argv: list[str] | None = None) -> int:
                 "invalid_tool_calls": [c.model_dump(mode="json") for c in exc.invalid_tool_calls],
             }
         )
-    print(json.dumps(result.model_dump(mode="json"), indent=2, ensure_ascii=False))
+    # Step-5 output shape is unchanged: the RAG-only fields (always empty here) are omitted.
+    shown = result.model_dump(mode="json", exclude={"retrievals", "citations"})
+    print(json.dumps(shown, indent=2, ensure_ascii=False))
     return 0
 
 

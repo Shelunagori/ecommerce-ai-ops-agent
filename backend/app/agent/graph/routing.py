@@ -24,11 +24,12 @@ from app.agent.graph.state import CommerceGraphState
 
 MODEL = "model"
 TOOLS = "tools"
+RETRIEVE = "retrieve"
 
 
 @dataclass(frozen=True)
 class TurnDecision:
-    kind: Literal["tools", "answer", "error"]
+    kind: Literal["tools", "retrieve", "answer", "error"]
     answer: str | None = None
     error_code: str | None = None
     error_detail: str | None = None
@@ -43,7 +44,13 @@ def evaluate_model_turn(
     seen_call_ids: Sequence[str],
     tool_calls_so_far: int,
     limits: AssistantLimits,
+    retrieval_name: str | None = None,
+    retrieval_done: bool = False,
 ) -> TurnDecision:
+    """``tool_calls_so_far`` counts EVERY capability call of the run (commerce + policy
+    retrieval, including invalid attempts). ``retrieval_name`` is the policy capability's
+    name when it is enabled (None: Step-5 parity profile, every call is a commerce call).
+    ``retrieval_done``: policy content was already returned to the model in this run."""
     # 1. Provider could not parse a tool request: execute nothing, fabricate nothing.
     if ai.invalid_tool_calls:
         return TurnDecision(
@@ -80,6 +87,17 @@ def evaluate_model_turn(
                 )
             seen.add(call_id)
             new_ids.append(call_id)
+        retrievals = [c for c in calls if retrieval_name and c.get("name") == retrieval_name]
+        kind: Literal["tools", "retrieve"] = "retrieve" if retrievals else "tools"
+        if retrievals and len(retrievals) != len(calls):
+            # One AIMessage may not mix capability classes: execute nothing of it.
+            return _protocol("mixed_capability_batch")
+        if kind == "tools" and retrieval_done:
+            # Deterministic boundary: once retrieved (untrusted) policy text is in the model's
+            # context, no new commerce capability may run in this user turn.
+            return _protocol("commerce_call_after_retrieval")
+        if len(retrievals) > 1:
+            return _limit("max_retrievals_per_turn")
         # Whole-batch budgets, checked before anything in the batch executes.
         if len(calls) > limits.max_tool_calls_per_turn:
             return _limit("max_tool_calls_per_turn")
@@ -88,7 +106,7 @@ def evaluate_model_turn(
         if round_no >= limits.max_model_rounds:
             # No model round left to read the results: reject before execution.
             return _limit("max_model_rounds")
-        return TurnDecision(kind="tools", new_call_ids=tuple(new_ids))
+        return TurnDecision(kind=kind, new_call_ids=tuple(new_ids))
 
     # 3. No tool calls: the visible text must be a real answer.
     answer = ai.text.strip()
@@ -107,17 +125,28 @@ def evaluate_model_turn(
     return TurnDecision(kind="answer", answer=answer)
 
 
+def _protocol(detail: str) -> TurnDecision:
+    return TurnDecision(kind="error", error_code="agent_protocol_error", error_detail=detail)
+
+
 def _limit(detail: str) -> TurnDecision:
     return TurnDecision(kind="error", error_code="agent_limit_exceeded", error_detail=detail)
 
 
 def route_after_model(state: CommerceGraphState) -> str:
-    """Approved batch -> TOOLS; final answer or terminal error -> END."""
+    """Approved commerce batch -> TOOLS; approved policy retrieval -> RETRIEVE;
+    final answer or terminal error -> END."""
     if state.get("error") is None and state.get("pending") is not None:
-        return TOOLS
+        return RETRIEVE if state.get("pending_kind") == "retrieval" else TOOLS
     return END
 
 
 def route_after_tools(state: CommerceGraphState) -> str:
     """Complete batch -> MODEL; host-side tool protocol failure -> END."""
+    return END if state.get("error") is not None else MODEL
+
+
+def route_after_retrieve(state: CommerceGraphState) -> str:
+    """Retrieval ToolMessage appended -> MODEL; retrieval infrastructure failure -> END
+    (the model is never asked to answer after a failed retrieval)."""
     return END if state.get("error") is not None else MODEL
