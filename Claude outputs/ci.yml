@@ -1,0 +1,329 @@
+# CommerceOps AI — CI and gated CD (see docs/CI_CD.md).
+#
+# One workflow, stable job names for branch protection: backend, frontend, e2e, security.
+# deploy-backend / deploy-frontend run ONLY for main (push or manual dispatch), ONLY after all
+# four CI jobs succeeded in this same run, ONLY when enabled by a repository variable, and ONLY
+# through the protected `production` GitHub Environment (approval + secrets live there).
+# Pull requests (including forks) never reach a deploy job and never receive deploy secrets.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch: # manual re-run on main: full CI, then the gated deploy jobs
+
+# Least privilege by default; no job needs more than read access to the repository.
+permissions:
+  contents: read
+
+# A newer commit cancels obsolete CI for the same pull request. Pushes to main are grouped by
+# commit and never cancelled (a deploy must not be interrupted half-way).
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_VERSION: "0.12.18" # matches the uv 0.12 image used by backend/Dockerfile
+  UV_LOCKED: "1" # every uv command must use uv.lock unchanged
+  FORCE_COLOR: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------------------------
+  backend:
+    name: backend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17 # same image as docker-compose.yml
+        env: # synthetic CI-only credentials for a throwaway container
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: commerceops_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci -d commerceops_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      # The suite refuses any database whose name does not end in _test.
+      TEST_DATABASE_URL: postgresql://ci:ci@localhost:5432/commerceops_test
+      APP_ENV: test
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Sync dependencies from the lockfile
+        run: uv sync --locked
+      - name: Lockfile is up to date
+        run: uv lock --check
+      - name: Format
+        run: uv run ruff format --check .
+      - name: Lint
+        run: uv run ruff check .
+      - name: "Migrations: clean database -> head"
+        env:
+          DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
+        run: uv run alembic upgrade head
+      - name: "Migrations: models match the migrated schema"
+        env:
+          DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
+        run: uv run alembic check
+      - name: Tests (full deterministic suite; live Ollama/Gemini tests stay skipped)
+        # The suite itself runs downgrade base -> upgrade head (round trip) before seeding.
+        run: uv run pytest -q -p no:cacheprovider -rs --junitxml=pytest-junit.xml
+      - name: Upload test report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-pytest-junit
+          path: backend/pytest-junit.xml
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  frontend:
+    name: frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      # Public, dummy build-time values only (never a server secret in NEXT_PUBLIC_*).
+      NEXT_PUBLIC_API_URL: http://127.0.0.1:8000
+      NEXT_PUBLIC_AUTH_MODE: demo
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install (lockfile, engine-strict)
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: Production build
+        run: npm run build
+
+  # ---------------------------------------------------------------------------------------------
+  e2e:
+    name: e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    # Own job => own runner and own PostgreSQL service container: the harness RESETS this
+    # database and never shares it with the backend job.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: commerceops_e2e_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci -d commerceops_e2e_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      # backend/tests/e2e/server.py migrates, seeds and ingests this database itself.
+      TEST_DATABASE_URL: postgresql://ci:ci@localhost:5432/commerceops_e2e_test
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Backend dependencies
+        working-directory: backend
+        run: uv sync --locked
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Install Chromium for Playwright
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      - name: Browser end-to-end (starts the harness API + Next.js dev server)
+        working-directory: frontend
+        run: npm run test:e2e
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-test-results
+          path: frontend/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  security:
+    name: security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+      PIP_AUDIT_VERSION: "2.10.1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the secret scan covers the whole history, not only the tip
+      - name: Secret scan (gitleaks, full history)
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --no-banner --redact --exit-code 1 .
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Python dependency audit (locked runtime dependencies)
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          uv export --locked --no-dev --no-hashes --no-emit-project -o "$RUNNER_TEMP/requirements.txt"
+          uvx "pip-audit==${PIP_AUDIT_VERSION}" --disable-pip --no-deps \
+            -r "$RUNNER_TEMP/requirements.txt"
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: frontend/.nvmrc
+      - name: npm audit (production dependencies, high and above)
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=high
+
+  # ---------------------------------------------------------------------------------------------
+  # CD. Deploy jobs need every CI job of THIS run, so a failing commit can never deploy.
+  deploy-backend:
+    name: deploy-backend
+    needs: [backend, frontend, e2e, security]
+    if: >-
+      github.ref == 'refs/heads/main'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && vars.RAILWAY_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: ${{ vars.BACKEND_URL }}
+    concurrency:
+      group: deploy-production-backend
+      cancel-in-progress: false
+    env:
+      RAILWAY_CLI_VERSION: "5.62.1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: frontend/.nvmrc
+      - name: Install Railway CLI (pinned)
+        run: npm install --global "@railway/cli@${RAILWAY_CLI_VERSION}"
+      - name: Deploy (Railway builds backend/Dockerfile; railway.json runs the pre-deploy step)
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }} # project token scoped to production
+          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+        run: |
+          set -euo pipefail
+          : "${RAILWAY_TOKEN:?RAILWAY_TOKEN secret is not set in the production environment}"
+          : "${RAILWAY_SERVICE:?RAILWAY_SERVICE variable is not set in the production environment}"
+          # Uploads the repository; the service's Root Directory (backend) and config file
+          # (/backend/railway.json) decide what is built. Migrations and checkpoint setup run
+          # ONLY in Railway's preDeployCommand (python -m scripts.predeploy), never here.
+          # Never pass -y: without a valid token the CLI must fail, not create a new project.
+          railway up --ci --service "$RAILWAY_SERVICE" --message "github-actions ${GITHUB_SHA::12}"
+      - name: Smoke check (liveness + readiness)
+        env:
+          BACKEND_URL: ${{ vars.BACKEND_URL }}
+        run: |
+          set -euo pipefail
+          : "${BACKEND_URL:?BACKEND_URL variable is not set in the production environment}"
+          for _ in $(seq 1 30); do
+            if curl -fsS "$BACKEND_URL/health/ready" | grep -q '"status":"ready"'; then
+              curl -fsS "$BACKEND_URL/health"
+              echo; echo "backend ready"; exit 0
+            fi
+            sleep 10
+          done
+          echo "backend did not report ready" >&2; exit 1
+
+  deploy-frontend:
+    name: deploy-frontend
+    needs: [backend, frontend, e2e, security, deploy-backend]
+    # The API deploys first; the frontend still deploys when backend CD is disabled
+    # (skipped), but never after a failed backend deploy.
+    if: >-
+      !cancelled()
+      && needs.backend.result == 'success' && needs.frontend.result == 'success'
+      && needs.e2e.result == 'success' && needs.security.result == 'success'
+      && needs.deploy-backend.result != 'failure'
+      && github.ref == 'refs/heads/main'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && vars.VERCEL_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: ${{ vars.FRONTEND_URL }}
+    concurrency:
+      group: deploy-production-frontend
+      cancel-in-progress: false
+    env:
+      VERCEL_CLI_VERSION: "59.26.0"
+      VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: frontend/.nvmrc
+      - name: Install Vercel CLI (pinned)
+        run: npm install --global "vercel@${VERCEL_CLI_VERSION}"
+      - name: Check deployment configuration
+        run: |
+          : "${VERCEL_TOKEN:?VERCEL_TOKEN secret is not set in the production environment}"
+          : "${VERCEL_ORG_ID:?VERCEL_ORG_ID variable is not set in the production environment}"
+          : "${VERCEL_PROJECT_ID:?VERCEL_PROJECT_ID variable is not set in the production environment}"
+      # The project's Root Directory is `frontend`; its NEXT_PUBLIC_* values come from the
+      # Vercel project's Production environment (public values only).
+      - name: Pull production project settings
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+      - name: Build
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+      - name: Deploy prebuilt output
+        run: vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"

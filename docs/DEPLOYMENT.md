@@ -99,9 +99,12 @@ project CA). Source: Supabase "Connect to your database" guide (checked Sept 202
    user's id (UUID) — that is the JWT `sub`.
 2. **Railway service** from this repo: root directory `backend`; set the service's config
    file path to `/backend/railway.json` (Railway's config file path does not follow the root
-   directory; it must be absolute). Set the variables above.
-3. **Deploy.** `railway.json` runs the pre-deploy step before the new container receives
-   traffic:
+   directory; it must be absolute). Set the variables above. **Disable Railway's GitHub
+   autodeploy** for the service: releases come from the gated `deploy-backend` job
+   (`docs/CI_CD.md`), which uploads with `railway up` using a production project token.
+3. **Deploy** (merge to `main` with CD enabled and approved, or *Run workflow* on `main`).
+   `railway.json` runs the pre-deploy step before the new container receives traffic — the
+   only place migrations run:
    `python -m scripts.predeploy` = `check_env` → `alembic upgrade head` →
    `setup_checkpoints`. Any failure aborts the release and the previous deployment keeps
    serving. The healthcheck is `GET /health/ready`.
@@ -120,9 +123,13 @@ project CA). Source: Supabase "Connect to your database" guide (checked Sept 202
    ```
 
 5. **Vercel project** from this repo: root directory `frontend`; Node.js 22.x or 24.x (from
-   `engines`; Node 20 is unsupported); set the four
-   `NEXT_PUBLIC_*` variables; deploy. Add the Vercel origin to Railway's `CORS_ORIGINS`.
-6. **Smoke checks** (below).
+   `engines`; Node 20 is unsupported); set the four `NEXT_PUBLIC_*` variables in its
+   **Production** environment. `frontend/vercel.json` stops the Git integration from
+   deploying `main`; production deploys come from the gated `deploy-frontend` job. Add the
+   Vercel origin to Railway's `CORS_ORIGINS`.
+6. **GitHub:** create the `production` environment (required reviewers, `main` only), its
+   secrets/variables and the two repository enable switches — names in `docs/CI_CD.md`.
+7. **Smoke checks** (below; `deploy-backend` also polls `/health/ready`).
 
 ## Smoke checks
 

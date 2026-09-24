@@ -116,6 +116,11 @@ No model at all? Run the **offline demo** (real stack, deterministic chat model)
 | Browser e2e | `npm run test:e2e` | real UI → real API → real PostgreSQL, deterministic model: lookup, citations, approve/reject, store credit, tenant separation, retry, no CSP violations |
 | Mutations | see COMPLETION_STATUS | each safety property has at least one mutation that turns the suite red |
 
+GitHub Actions ([`ci.yml`](.github/workflows/ci.yml)) runs `backend`, `frontend`, `e2e` and
+`security` on every pull request and push to `main`; gated Railway/Vercel deploy jobs follow
+on `main` only after all four pass and the `production` environment approves. See
+[docs/CI_CD.md](docs/CI_CD.md).
+
 ## Documentation
 
 | Doc | Contents |
@@ -124,6 +129,7 @@ No model at all? Run the **offline demo** (real stack, deterministic chat model)
 | [DEMO_SCENARIOS.md](docs/DEMO_SCENARIOS.md) | five demo walkthroughs |
 | [DEVELOPMENT.md](docs/DEVELOPMENT.md) | setup, CLI reference, tests |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Railway + Supabase + Vercel runbook (not executed) |
+| [CI_CD.md](docs/CI_CD.md) | GitHub Actions CI, gated CD, environments/secrets (names), branch protection, rollback |
 | [SECURITY.md](docs/SECURITY.md) | trust boundaries, controls, review results |
 | [OBSERVABILITY.md](docs/OBSERVABILITY.md) | logs, run records, audit trail, optional LangSmith |
 | [pending-items.md](docs/pending-items.md) | known limitations and follow-ups |
