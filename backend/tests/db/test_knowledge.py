@@ -24,7 +24,8 @@ from app.knowledge.ingest import (
     document_id_for,
     ingest_policies,
 )
-from app.knowledge.retrieval import MAX_LIMIT, LexicalPolicyRetriever
+from app.knowledge.limits import MAX_LIMIT
+from app.knowledge.retrieval import LexicalPolicyRetriever
 from app.knowledge.sources import DEFAULT_POLICY_DIR, PolicySourceError
 from app.models import KnowledgeChunk, KnowledgeDocument
 from app.services import KnowledgeQueries

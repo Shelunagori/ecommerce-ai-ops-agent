@@ -1,7 +1,12 @@
-"""Developer-only: run the lexical baseline retriever for one tenant (no LLM, no embeddings).
+"""Developer-only: run a policy retriever for one tenant (retrieval only, no LLM answer).
 
     uv run python -m scripts.search_policies --tenant <uuid> \\
         --query "compensation for delayed shipment" --as-of 2026-09-01 [--limit 5]
+    uv run python -m scripts.search_policies --retriever semantic --tenant <uuid> \\
+        --query "express delivery compensation"
+
+* --retriever: lexical (default, lexical-pg-fts-v1) or semantic (semantic-pgvector-v1;
+  needs local Ollama with the embedding model and `scripts.embed_policies` run first).
 
 * --tenant is TRUSTED context, validated against the tenants table first; the query text
   never selects a tenant, version or limit beyond the hard maximum.
@@ -21,7 +26,11 @@ from datetime import date, datetime
 from app.agent.context import create_agent_context
 from app.core.errors import TenantNotFoundError
 from app.db.session import read_only_session
-from app.knowledge.retrieval import DEFAULT_LIMIT, MAX_LIMIT, LexicalPolicyRetriever
+from app.knowledge.embeddings.errors import EmbeddingError
+from app.knowledge.embeddings.provider import get_embedding_provider
+from app.knowledge.limits import DEFAULT_LIMIT, MAX_LIMIT
+from app.knowledge.retrieval import LexicalPolicyRetriever
+from app.knowledge.semantic import SemanticKnowledgeRetriever
 from scripts.run_assistant import _configure_logging, _fail
 
 
@@ -46,6 +55,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=range(1, MAX_LIMIT + 1),
         metavar=f"1-{MAX_LIMIT}",
     )
+    parser.add_argument("--retriever", choices=("lexical", "semantic"), default="lexical")
     parser.add_argument("--request-id", default=None)
     ns = parser.parse_args(argv)
     _configure_logging()
@@ -57,9 +67,15 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         return _fail({"error": {"code": "invalid_request_id", "message": str(exc)}})
 
-    result = LexicalPolicyRetriever(read_only_session).retrieve(
-        ns.query, context, as_of=ns.as_of, limit=ns.limit
-    )
+    try:
+        retriever = (
+            SemanticKnowledgeRetriever(read_only_session, get_embedding_provider())
+            if ns.retriever == "semantic"
+            else LexicalPolicyRetriever(read_only_session)
+        )
+        result = retriever.retrieve(ns.query, context, as_of=ns.as_of, limit=ns.limit)
+    except EmbeddingError as exc:
+        return _fail({"error": {"code": exc.code, "message": exc.message}})
     out = {"query": ns.query, **result.model_dump(mode="json")}
     print(json.dumps(out, indent=2, ensure_ascii=False))
     return 0

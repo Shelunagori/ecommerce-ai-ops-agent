@@ -5,7 +5,8 @@ from datetime import UTC, date, datetime, timedelta, timezone
 import pytest
 
 from app.knowledge.citations import citation_for, parse_citation
-from app.knowledge.retrieval import MAX_LIMIT, MAX_QUERY_TERMS, query_terms, validate_limit
+from app.knowledge.limits import MAX_LIMIT, validate_limit
+from app.knowledge.retrieval import MAX_QUERY_TERMS, query_terms
 from app.knowledge.temporal import effective_date
 
 
@@ -97,3 +98,22 @@ def test_limit_bounds(limit):
 
 def test_limit_defaults_and_maximum():
     assert validate_limit(1) == 1 and validate_limit(MAX_LIMIT) == MAX_LIMIT == 10
+
+
+def test_one_authoritative_limit_definition():
+    """lexical, semantic, the vector query boundary and the CLI all use app.knowledge.limits."""
+    import inspect
+
+    import app.knowledge.retrieval as lexical
+    import app.knowledge.semantic as semantic
+    import app.services.knowledge as service
+    import scripts.search_policies as cli
+    from app.knowledge import limits
+
+    assert (limits.DEFAULT_LIMIT, limits.MAX_LIMIT) == (5, 10)
+    assert lexical.validate_limit is semantic.validate_limit is service.validate_limit
+    assert lexical.validate_limit is limits.validate_limit and cli.MAX_LIMIT == limits.MAX_LIMIT
+    for module in (lexical, semantic, service):
+        source = inspect.getsource(module)
+        for literal in ("<= 10", "MAX_LIMIT = ", "DEFAULT_LIMIT = "):
+            assert literal not in source, (module.__name__, literal)

@@ -30,7 +30,7 @@ import uuid
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import UTC, date, datetime
-from typing import Protocol
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import bindparam, text
@@ -38,12 +38,11 @@ from sqlalchemy.orm import Session
 
 from app.agent.context import AgentContext
 from app.knowledge.citations import citation_for
+from app.knowledge.limits import DEFAULT_LIMIT, validate_limit
 from app.knowledge.temporal import effective_date
 
 logger = logging.getLogger("app.knowledge.retrieval")
 
-DEFAULT_LIMIT = 5
-MAX_LIMIT = 10
 MAX_QUERY_CHARS = 500
 MAX_QUERY_TERMS = 32
 _TERM = re.compile(r"[a-z0-9]+")
@@ -72,8 +71,12 @@ class RetrievalResult(BaseModel):
 
     retriever: str
     as_of: date
-    term_count: int  # trusted [a-z0-9]+ terms extracted from the query text
-    lexeme_count: int  # meaningful lexemes left after PostgreSQL stemming / stop words
+    # "ts_rank_cd" (lexical, unbounded relevance) or "cosine_similarity" (semantic, -1..1).
+    # Neither is a calibrated confidence or probability.
+    score_type: Literal["ts_rank_cd", "cosine_similarity"]
+    embedding_profile: str | None = None  # semantic only: concrete embedding profile key
+    term_count: int | None = None  # lexical only: trusted [a-z0-9]+ terms from the query
+    lexeme_count: int | None = None  # lexical only: lexemes left after PostgreSQL stop words
     results: list[RetrievedChunk]
 
 
@@ -101,12 +104,6 @@ def query_terms(query: str) -> list[str]:
             if len(terms) == MAX_QUERY_TERMS:
                 break
     return terms
-
-
-def validate_limit(limit: int) -> int:
-    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_LIMIT:
-        raise ValueError(f"limit must be an integer between 1 and {MAX_LIMIT}")
-    return limit
 
 
 _LEXEME_SQL = text(
@@ -210,6 +207,7 @@ class LexicalPolicyRetriever:
         result = RetrievalResult(
             retriever=self.name,
             as_of=day,
+            score_type="ts_rank_cd",
             term_count=len(terms),
             lexeme_count=lexemes,
             results=results,

@@ -7,12 +7,14 @@ document-table query. Temporal selection never reads a clock: callers pass ``as_
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Select, and_, or_, select
+from sqlalchemy import Select, and_, exists, or_, select
 
 from app.core.errors import NotFoundError
 from app.knowledge.citations import citation_for, parse_citation
+from app.knowledge.embeddings.profile import EmbeddingProfile
+from app.knowledge.limits import validate_limit
 from app.knowledge.temporal import effective_date
-from app.models import KnowledgeChunk, KnowledgeDocument
+from app.models import KnowledgeChunk, KnowledgeChunkEmbedding, KnowledgeDocument
 from app.schemas.knowledge import KnowledgeChunkRead, KnowledgeDocumentRead
 from app.services.base import TenantScopedQueries
 
@@ -123,3 +125,54 @@ class KnowledgeQueries(TenantScopedQueries):
         if row is None:
             raise NotFoundError("knowledge_chunk", citation)
         return self._chunk_read(*row)
+
+    # --- semantic (pgvector) -------------------------------------------------------------
+    def _profile_filter(self, profile: EmbeddingProfile):  # noqa: ANN202 - SQL clause
+        e = KnowledgeChunkEmbedding
+        return and_(
+            e.tenant_id == self._tenant_id,
+            e.provider == profile.provider,
+            e.model == profile.model,
+            e.model_digest == profile.model_digest,
+            e.dimensions == profile.dimensions,
+            e.input_version == profile.input_version,
+        )
+
+    def has_embeddings(self, profile: EmbeddingProfile) -> bool:
+        """Whether THIS tenant has any vectors in exactly this concrete profile."""
+        return bool(self._session.scalar(select(exists().where(self._profile_filter(profile)))))
+
+    def nearest_chunks(
+        self,
+        query_vector: list[float],
+        profile: EmbeddingProfile,
+        as_of: date | datetime,
+        limit: int,
+    ) -> list[tuple[KnowledgeChunkRead, float]]:
+        """Exact cosine search (no ANN index), eligibility filtered IN the same statement:
+        tenant (all three tables), concrete embedding profile incl. model digest and
+        dimensions, and the effective policy version on ``as_of``. Returns (chunk,
+        cosine_similarity) with similarity = 1 - cosine distance (``<=>``), in [-1, 1].
+        Order: distance ASC, document_key, version DESC, chunk_index (deterministic)."""
+        if len(query_vector) != profile.dimensions:
+            raise ValueError("query vector dimensions do not match the profile")
+        validate_limit(limit)
+        e = KnowledgeChunkEmbedding
+        distance = e.embedding.cosine_distance(query_vector)
+        stmt = (
+            self._chunks()
+            .add_columns((1 - distance).label("similarity"))
+            .join(e, and_(e.tenant_id == KnowledgeChunk.tenant_id, e.chunk_id == KnowledgeChunk.id))
+            .where(self._profile_filter(profile), effective_filter(effective_date(as_of)))
+            .order_by(
+                distance,
+                KnowledgeDocument.document_key,
+                KnowledgeDocument.version.desc(),
+                KnowledgeChunk.chunk_index,
+            )
+            .limit(limit)
+        )
+        return [
+            (self._chunk_read(chunk, doc), float(similarity))
+            for chunk, doc, similarity in self._session.execute(stmt)
+        ]

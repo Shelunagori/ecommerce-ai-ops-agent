@@ -7,7 +7,7 @@ invoices, shipments and company policies, with human approval for sensitive acti
 > **Data notice:** no real customer or company data is used. The project will use
 > synthetic ecommerce data only.
 
-## Status: Step 7 — knowledge / RAG foundation
+## Status: Step 8 — embeddings and semantic retrieval
 
 What exists today:
 
@@ -15,8 +15,8 @@ What exists today:
   (with request id and tenant id), CORS, and health endpoints (`/health`, `/health/db`)
 - **Ecommerce domain model** in PostgreSQL: tenants, customers, products, orders,
   order items, invoices, shipments — with database-enforced tenant integrity
-- Alembic migrations `0001` (ecommerce schema) and `0002` (knowledge documents/chunks); no
-  extensions enabled
+- Alembic migrations `0001` (ecommerce schema), `0002` (knowledge documents/chunks) and
+  `0003` (pgvector chunk embeddings; enables the `vector` extension)
 - A tenant-scoped, read-only **query layer** (`app/services`) that future agent tools will
   call directly, plus a small set of read-only `/api/...` endpoints over it
 - An idempotent **synthetic** seed script with two demo tenants
@@ -45,11 +45,23 @@ What exists today:
   tenant-relative citations and a deterministic **lexical** baseline retriever
   (PostgreSQL full-text search), with a 20-case retrieval evaluation set. It retrieves
   chunks only: nothing is generated and the assistant does not use it yet.
+- **Embeddings and semantic retrieval** (`app/knowledge/embeddings`, `app/knowledge/semantic.py`):
+  local Ollama `nomic-embed-text-v2-moe` (768 dimensions) behind a provider-neutral
+  contract, vectors stored in PostgreSQL with pgvector in a separate
+  `knowledge_chunk_embeddings` table per concrete embedding profile (including the resolved
+  model digest), and an exact cosine-similarity retriever (`semantic-pgvector-v1`) with the
+  same tenant, effective-date, limit and citation rules as the lexical baseline. Both
+  retrievers are scored on the same 20 evaluation cases. On the fixed 20-case synthetic
+  evaluation corpus, semantic retrieval achieved exact-chunk hit@1 of 1.00 versus 0.40 for
+  lexical retrieval (12 semantic wins, 8 ties, 0 losses per case; document hit@1 is 1.00
+  for both). This is a small synthetic set, not a general accuracy claim — see
+  [architecture](docs/architecture.md#embeddings-and-semantic-retrieval-step-8).
+  Retrieval only: no hybrid ranking, no ANN index, no generated answers.
 - Next.js page showing API/database status and per-tenant demo data counts
 - Backend tests, including real-PostgreSQL tests for constraints and cross-tenant isolation
 
-What does **not** exist yet: embeddings, pgvector vector storage, semantic retrieval,
-RAG answer generation or policy tools for the model, business actions/writes, durable
+What does **not** exist yet: hybrid lexical+semantic ranking, rerankers, ANN (HNSW /
+IVFFlat) indexes, RAG answer generation or policy tools for the model, business actions/writes, durable
 checkpoints or long-term memory, human approval, full evaluation or observability. Those
 are planned, not built.
 
@@ -57,8 +69,8 @@ are planned, not built.
 
 Done: relational ecommerce data model, synthetic seed data, read-only business tools, LLM
 provider layer (Ollama / Gemini), explicit model-driven tool calling, LangGraph
-orchestration, knowledge/RAG foundation with a lexical baseline. Next, roughly in order:
-embeddings + pgvector semantic retrieval → RAG answers with citations →
+orchestration, knowledge/RAG foundation with a lexical baseline, embeddings + pgvector
+semantic retrieval. Next, roughly in order: hybrid retrieval → RAG answers with citations →
 human-in-the-loop approvals → durable agent state/memory → evaluation → observability →
 production deployment.
 
@@ -77,7 +89,8 @@ Browser ──▶ Next.js frontend (Vercel) ──fetch──▶ FastAPI backend
 | --- | --- |
 | Structured business data (orders, invoices, shipments, …) | PostgreSQL tables, queried deterministically |
 | Policy knowledge (refunds, returns, shipping, …) | `knowledge_documents` / `knowledge_chunks`, lexical retrieval (Step 7) |
-| Embeddings / vector search / RAG answers | **Not implemented yet** |
+| Policy embeddings | `knowledge_chunk_embeddings` (pgvector), exact cosine retrieval (Step 8) |
+| RAG answers / hybrid ranking | **Not implemented yet** |
 
 - The backend is stateless; all state lives in PostgreSQL. No Redis, queues or workers.
 - Supabase is treated as plain hosted PostgreSQL (no Supabase SDK).
@@ -259,6 +272,23 @@ run without writing. Search prints ranked chunks with score, citation
 (`policy://<document_key>/v<version>#chunk-<n>`), version and effective dates. `--as-of`
 takes a date or a timezone-aware datetime (naive datetimes are rejected).
 
+### Policy embeddings and semantic search (local Ollama; no LLM answer)
+
+```bash
+ollama pull nomic-embed-text-v2-moe         # local embedding model (768 dimensions)
+uv run python -m scripts.ingest_policies
+uv run python -m scripts.embed_policies     # idempotent; refuses APP_ENV=production
+uv run python -m scripts.search_policies --retriever semantic --tenant $BLUEPEAK \
+  --query "express delivery compensation"
+uv run python -m scripts.eval_retrieval --retriever semantic   # 20 cases, vs lexical
+```
+
+`embed_policies` resolves the model digest once, embeds only chunks missing for that
+concrete profile and prints a JSON summary. Re-pulling the model under the same tag gives a
+new digest, i.e. a new profile: run `embed_policies` again (old vectors stay untouched).
+Semantic search refuses to run (`embedding_profile_not_materialized`) until the current
+profile has been materialized; it never falls back to vectors from another model build.
+
 ### LangGraph assistant
 
 ```bash
@@ -299,6 +329,8 @@ RUN_OLLAMA_INTEGRATION=1 uv run pytest tests/integration -m llm_integration
 RUN_GEMINI_INTEGRATION=1 uv run pytest tests/integration -m llm_integration   # uses quota
 # Live tool-calling loops (Step 5 loop and Step 6 graph) need TEST_DATABASE_URL as well:
 RUN_OLLAMA_INTEGRATION=1 TEST_DATABASE_URL=... uv run pytest tests/db/test_assistant_live.py tests/db/test_graph_live.py
+# Live embeddings (needs `ollama pull nomic-embed-text-v2-moe`):
+RUN_OLLAMA_INTEGRATION=1 TEST_DATABASE_URL=... uv run pytest tests/db/test_embeddings_live.py
 
 cd ../frontend
 npm run lint && npm run typecheck && npm run build

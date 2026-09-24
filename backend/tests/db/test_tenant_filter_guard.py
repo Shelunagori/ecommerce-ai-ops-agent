@@ -14,6 +14,7 @@ import pytest
 from sqlalchemy import event
 
 from app.core.errors import NotFoundError
+from app.knowledge.embeddings.profile import EmbeddingProfile
 from app.models.enums import OrderStatus, ShipmentStatus
 from app.services import (
     CustomerQueries,
@@ -39,6 +40,11 @@ SAMPLE_ARGS = {
     "as_of": date(2026, 6, 10),
     "chunk_id": uuid.UUID(int=1),
     "citation": "policy://refund-policy/v1#chunk-1",
+    "profile": EmbeddingProfile(
+        "ollama", "nomic-embed-text-v2-moe:latest", "a" * 64, 3, "policy-embedding-input-v1"
+    ),
+    "query_vector": [1.0, 0.0, 0.0],
+    "limit": 5,
 }
 STATUS_FOR = {OrderQueries: OrderStatus.PROCESSING, ShipmentQueries: ShipmentStatus.DELAYED}
 CLASSES = [

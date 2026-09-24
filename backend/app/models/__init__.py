@@ -3,7 +3,7 @@
 from app.models.base import Base
 from app.models.customer import Customer
 from app.models.invoice import Invoice
-from app.models.knowledge import KnowledgeChunk, KnowledgeDocument
+from app.models.knowledge import KnowledgeChunk, KnowledgeChunkEmbedding, KnowledgeDocument
 from app.models.order import Order, OrderItem
 from app.models.product import Product
 from app.models.shipment import Shipment
@@ -14,6 +14,7 @@ __all__ = [
     "Customer",
     "Invoice",
     "KnowledgeChunk",
+    "KnowledgeChunkEmbedding",
     "KnowledgeDocument",
     "Order",
     "OrderItem",

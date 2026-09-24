@@ -44,6 +44,15 @@ class Settings(BaseSettings):
     knowledge_chunk_max_chars: int = Field(default=1200, ge=200, le=4000)
     knowledge_chunk_overlap_chars: int = Field(default=0, ge=0, le=300)
 
+    # Embeddings (Step 8) - separate from the chat-model settings above. The Ollama server
+    # is the same ``ollama_base_url``; the model is a dedicated embedding model.
+    embedding_provider: Literal["ollama"] = "ollama"
+    ollama_embedding_model: str = "nomic-embed-text-v2-moe"
+    embedding_dimensions: int = Field(default=768, ge=1, le=16000)
+    embedding_timeout_seconds: float = Field(default=60.0, ge=1, le=300)
+    embedding_batch_size: int = Field(default=16, ge=1, le=64)
+    embedding_max_retries: int = Field(default=1, ge=0, le=2)  # transient failures only
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:

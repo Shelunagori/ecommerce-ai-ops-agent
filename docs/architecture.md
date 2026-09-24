@@ -1,11 +1,11 @@
 # Architecture notes
 
-Current step: **Step 7 — knowledge / RAG foundation.** Versioned synthetic policies are
-loaded, chunked, ingested and retrieved by a deterministic lexical baseline, tenant-scoped
-and effective-date aware, with citation-ready chunks. The Step-5 loop and the Step-6
-LangGraph assistant are unchanged and do not use the knowledge base yet. There are no
-embeddings, no vector search, no RAG answer generation, no durable persistence, long-term
-memory or human approval yet.
+Current step: **Step 8 — embeddings and semantic retrieval.** Policy chunks are embedded
+with local Ollama `nomic-embed-text-v2-moe`, stored with pgvector per concrete embedding
+profile, and retrieved by exact cosine similarity next to the unchanged Step-7 lexical
+baseline, with the same tenant, effective-date and citation rules. Retrieval only: no
+hybrid ranking, no ANN index, no RAG answer generation; the assistants do not use the
+knowledge base yet. No durable persistence, long-term memory or human approval yet.
 
 | Concern | Where it lives |
 | --- | --- |
@@ -16,7 +16,8 @@ memory or human approval yet.
 | Graph orchestration | `app/agent/graph` — LangGraph `StateGraph` (model / tools nodes), same limits and result contract |
 | Language models | `app/agent/llm` — provider-neutral layer over Ollama (local) and Gemini (hosted) |
 | Policy knowledge | `app/knowledge` + `knowledge_documents` / `knowledge_chunks` (migration `0002`) — lexical retrieval |
-| Embeddings / vector search / RAG answers | Not implemented yet (pgvector image present, extension not enabled) |
+| Policy embeddings | `app/knowledge/embeddings` + `knowledge_chunk_embeddings` (migration `0003`, pgvector) — exact cosine retrieval |
+| RAG answers / hybrid ranking | Not implemented yet |
 
 ## Backend layout (`backend/`)
 
@@ -75,7 +76,15 @@ memory or human approval yet.
 | `app/knowledge/retrieval.py` | `KnowledgeRetriever` protocol, `LexicalPolicyRetriever` (`lexical-pg-fts-v1`) |
 | `app/knowledge/evaluation.py` | Retriever-agnostic hit@k evaluation over `data/eval/policy_retrieval_cases.yaml` |
 | `app/services/knowledge.py` | `KnowledgeQueries` — tenant-scoped document/chunk/effective-version/citation lookups |
-| `scripts/ingest_policies.py`, `scripts/search_policies.py` | Developer-only ingestion and search CLIs |
+| `scripts/ingest_policies.py`, `scripts/search_policies.py` | Developer-only ingestion and search CLIs (`--retriever lexical|semantic`) |
+| `app/knowledge/embeddings/provider.py` | `EmbeddingProvider` protocol, `OllamaEmbeddingProvider` (`ollama.Client.embed`, `truncate=False`), digest resolution, retries, validation helpers |
+| `app/knowledge/limits.py` | The single retrieval-limit definition (default 5, hard maximum 10) |
+| `app/knowledge/embeddings/profile.py` | `EmbeddingProfile` (provider, model tag, model digest, dimensions, input version) |
+| `app/knowledge/embeddings/inputs.py` | `policy-embedding-input-v1` document/query text (prefixes), input hash |
+| `app/knowledge/embeddings/validation.py` | Count / dimension / finite / non-zero checks for every vector |
+| `app/knowledge/embeddings/materialize.py` | Atomic, idempotent embedding materialization per profile |
+| `app/knowledge/semantic.py` | `SemanticKnowledgeRetriever` (`semantic-pgvector-v1`) |
+| `scripts/embed_policies.py`, `scripts/eval_retrieval.py` | Developer-only embedding materialization and retrieval evaluation CLIs |
 
 ## Domain model
 
@@ -707,8 +716,136 @@ Each document's first chunk is the fictional-policy disclaimer; this retrieval
 boilerplate may be reconsidered before or during vector indexing. The numbers are
 recorded as-is, not tuned; a test fails if they drift so changes are deliberate.
 
-**Not implemented:** embeddings, pgvector semantic retrieval, RAG answer generation,
-policy tools for the model, LangGraph integration.
+## Embeddings and semantic retrieval (Step 8)
+
+**Embeddings.** An embedding model turns text such as `"express delivery compensation"`
+into a vector of 768 numbers so that texts with similar *meaning* get nearby vectors.
+**pgvector** keeps those vectors inside PostgreSQL and compares them by cosine similarity,
+so tenant, version and profile filters stay in the same SQL statement as the ranking.
+
+```
+Lexical  (lexical-pg-fts-v1):    matching words     "express" ≠ "Priority"
+Semantic (semantic-pgvector-v1): matching meaning   "express delivery" ≈ "Priority 2–3 days"
+```
+
+**Provider.** `EmbeddingProvider` (`provider_name`, `model_name`, `dimensions`,
+`resolve_model_digest()`, `embed_documents()`, `embed_query()`); Step 8 implements only
+`OllamaEmbeddingProvider` over the official `ollama` client (0.6.2): one request path,
+`Client.embed(model, input=[...], truncate=False, dimensions=<configured>)`, for documents
+AND queries (a query is a one-element batch). `truncate=False` is explicit on every request
+because Ollama would otherwise cut over-long inputs silently, and
+`langchain_ollama.OllamaEmbeddings` does not expose that switch; an over-long input is
+refused as `embedding_input_too_long`. Construction makes no request; the configured
+`ollama_base_url` and the httpx timeout are applied to the client. Retries: only timeouts, connection
+errors and Ollama 5xx, at most `embedding_max_retries` (default 1, cap 2). Stable errors:
+`embedding_unavailable`, `embedding_timeout`, `embedding_model_not_found`,
+`embedding_provider_error`, `embedding_count_mismatch`, `embedding_dimension_mismatch`,
+`embedding_non_finite`, `embedding_zero_vector`, `embedding_input_too_long`,
+`embedding_stale_conflict`,
+`embedding_profile_not_materialized` — never raw server text. Settings are separate from
+the chat model: `embedding_provider`, `ollama_embedding_model`
+(`nomic-embed-text-v2-moe`), `embedding_dimensions` (768), `embedding_timeout_seconds`,
+`embedding_batch_size` (16), `embedding_max_retries`.
+
+**Concrete embedding profile.** `ollama/nomic-embed-text-v2-moe:latest@<digest>/768/policy-embedding-input-v1`
+= provider, configured tag, **resolved model digest**, dimensions, input version. The
+digest is part of the identity because `:latest` is mutable: a re-pulled build is a
+different vector space. It is resolved from the local Ollama model list when an operation
+needs embeddings (materialization, semantic retrieval) and cached per provider object. A new
+digest is a new profile: old vectors stay, new vectors coexist, and a query vector is only
+ever compared with document vectors of the same concrete profile. If the current profile
+has no vectors for the tenant, semantic retrieval fails with
+`embedding_profile_not_materialized` — never a fallback to another digest.
+
+**Input representation (`policy-embedding-input-v1`).**
+`search_document: Title: <title>\nSection: <section path>\n\n<chunk content>` for chunks
+and `search_query: <query>` for queries (the model's task prefixes, applied in one module,
+never by callers). No tenant ids, database ids, paths or citations. `input_hash` =
+sha256 of the exact text. The model has a finite context (512 tokens); inputs are
+**never truncated** — not in application code, and not by Ollama (`truncate=False`) — since
+that would make the recorded hash lie. The chunker bounds chunk size, and the live test
+proves every current chunk is accepted.
+
+**Validation.** Every returned vector (documents and queries): correct count, exact
+dimensions, finite numbers only (no NaN / ±inf / non-numeric), non-zero L2 norm (a zero
+vector has no cosine direction). pgvector additionally rejects NaN at the database level.
+
+**Storage.** `knowledge_chunk_embeddings` is separate from `knowledge_chunks`: chunks are
+source-derived knowledge units, embeddings are model/version-dependent derived artifacts.
+Columns: tenant, chunk, provider, model, model_digest, dimensions, input_version,
+input_hash, `embedding vector` (generic, unsized, so later profiles may use other sizes),
+created_at. Constraints: composite FK `(tenant_id, chunk_id)` → `knowledge_chunks(tenant_id,
+id)` (so an embedding can never belong to another tenant's chunk), unique per chunk and
+profile, `vector_dims(embedding) = dimensions`, dimensions 1–16000, format checks. ID =
+`uuid5(chunk_id/profile key)`.
+
+**Materialization** (`scripts.embed_policies`, dev only; refuses `APP_ENV=production`):
+resolve the profile → read all chunks → build inputs → same profile + same input hash =
+unchanged; same profile + different input hash = `embedding_stale_conflict` (abort before
+any model call, nothing overwritten) → embed missing chunks in batches → validate → insert
+in one transaction. Never deletes rows; other profiles are untouched. Logs: profile key,
+counts, batches, batch size, outcome, duration — never vectors or content.
+
+**Search (`semantic-pgvector-v1`).** Same contract as lexical: `retrieve(query, context,
+*, as_of=None, limit=5)`, limit 1–10 (`app/knowledge/limits.py` is the single definition
+used by both retrievers, the vector query boundary and the CLI), query trimmed and capped at 500 chars (empty → empty,
+no provider call). One statement joins embeddings → chunks → documents with the tenant on
+all three tables, the full concrete profile (provider, model, digest, dimensions, input
+version) and the effective-date filter, orders by `embedding <=> :query` (pgvector cosine
+distance) then document key, version desc, chunk index, and limits. Nothing is retrieved
+globally and filtered afterwards. Query vectors are never stored. Score:
+`cosine_similarity = 1 − cosine_distance`, in [−1, 1]; higher is more similar. It is not a
+calibrated confidence or probability and is not comparable across profiles or with the
+lexical `ts_rank_cd` score (`score_type` says which one a result carries). Citations are
+the unchanged tenant-relative Step-7 form.
+
+**Why no HNSW / IVFFlat yet.** Exact search over a tiny corpus gives the evaluation ground
+truth without approximate-recall effects. ANN indexes become relevant with corpus growth
+and should be introduced together with latency and recall measurements against exact
+search.
+
+**Why no RAG answer yet.** Step 8 measures retrieval on its own, independent of generation
+quality. Hybrid lexical + semantic ranking is deliberately not built; it comes after both
+baselines exist.
+
+**Migration 0003 downgrade is asymmetric.** It drops the embedding table, its index and the
+added `UNIQUE (tenant_id, id)` on chunks, but keeps the `vector` extension: `CREATE
+EXTENSION IF NOT EXISTS` cannot prove this migration created it, and it may be shared
+(e.g. pre-installed on managed PostgreSQL). Removing it is a deliberate manual action.
+
+**Semantic baseline.** Recorded on a developer machine with Ollama in
+`data/eval/semantic_baseline_v1.json` (provider, model, model digest, dimensions, input
+version, cases and corpus fingerprints, metrics and per-case ranks — no vectors or exact
+similarity values) via `scripts.eval_retrieval --retriever semantic --write …`.
+Measured profile: `ollama/nomic-embed-text-v2-moe:latest@ff9c2f10…0965/768/policy-embedding-input-v1`
+(full digest in the snapshot); all 51 chunks were accepted by the model without truncation
+(first `embed_policies` run 51 embedded, second run 51 unchanged).
+
+| Retriever (k = 3, all 20 cases) | document hit@1 | document hit@3 | chunk hit@1 | chunk hit@3 |
+| --- | --- | --- | --- | --- |
+| Lexical `lexical-pg-fts-v1` | 1.00 | 1.00 | 0.40 | 0.85 |
+| Semantic `semantic-pgvector-v1` | 1.00 | 1.00 | 1.00 | 1.00 |
+
+On the fixed 20-case synthetic evaluation corpus, semantic retrieval achieved exact-chunk
+hit@1 of 1.00 versus 0.40 for lexical retrieval. Per case (exact-chunk rank): 12 semantic
+wins, 8 ties, 0 losses. The deliberate vocabulary mismatch `bp-express-cost` (BluePeak
+calls its fast option "Priority") moved from not-in-top-3 (lexical) to rank 1 (semantic).
+This is a small, synthetic, fixed set written alongside the corpus; it is not evidence of
+general retrieval accuracy, and nothing (model, chunking, cases) was tuned to it.
+Growing the evaluation set is tracked as P8.
+
+**Baseline integrity.** `tests/knowledge/test_semantic_baseline.py` checks the committed
+snapshot offline: exact schema, provenance consistent with the configured provider, model
+tag, dimensions, input version and chunker, the cases fingerprint and ids against the
+current case file, aggregate metrics recomputed from the per-case ranks, no vectors or
+scores, the 12/8/0 comparison with `lexical_baseline_v1.json`, and the express/Priority
+case. `tests/db/test_semantic_baseline_corpus.py` checks the corpus fingerprint against a
+fresh ingest. Recomputing the ranks with the real model stays opt-in
+(`RUN_OLLAMA_INTEGRATION=1`, `tests/db/test_embeddings_live.py`), and is skipped when the
+local model digest differs from the recorded one.
+
+**Not implemented:** hybrid ranking, rerankers, ANN indexes, RAG answer generation, policy
+tools for the model, LangGraph integration.
 
 ## Open items
 

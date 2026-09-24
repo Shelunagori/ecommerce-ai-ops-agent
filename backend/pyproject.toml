@@ -15,6 +15,7 @@ dependencies = [
     "langchain==1.4.2",
     "langgraph==1.2.12",
     "pyyaml==6.0.3",  # policy front matter (yaml.safe_load only)
+    "pgvector==0.5.0",  # SQLAlchemy Vector type + cosine_distance (<=>)
     "langchain-ollama==1.1.0",
     "langchain-google-genai==4.4.0",
 ]

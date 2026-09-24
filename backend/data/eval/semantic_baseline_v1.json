@@ -1,0 +1,121 @@
+{
+  "retriever": "semantic-pgvector-v1",
+  "cases_file": "data/eval/policy_retrieval_cases.yaml",
+  "cases_sha256": "04dd54d501444dcd8e9a055eb2f637cd4bef8bf6adf52c95ed2e1cf009c8be35",
+  "chunker": "policy-section-v1",
+  "k": 3,
+  "embedding_profile": {
+    "provider": "ollama",
+    "model": "nomic-embed-text-v2-moe:latest",
+    "model_digest": "ff9c2f10ef5e3722623a1b396e1e04efc27a93112c83e9b7b7b9ca1d05620965",
+    "dimensions": 768,
+    "input_version": "policy-embedding-input-v1",
+    "key": "ollama/nomic-embed-text-v2-moe:latest@ff9c2f10ef5e3722623a1b396e1e04efc27a93112c83e9b7b7b9ca1d05620965/768/policy-embedding-input-v1"
+  },
+  "corpus_sha256": "eaedcff7a5b4691415357e197343147b3ab8df65386e1eab0945f6e29cd015e2",
+  "metrics": {
+    "all": {
+      "cases": 20,
+      "document_hit@1": 1.0,
+      "document_hit@3": 1.0,
+      "chunk_hit@1": 1.0,
+      "chunk_hit@3": 1.0
+    },
+    "bluepeak-retail": {
+      "cases": 10,
+      "document_hit@1": 1.0,
+      "document_hit@3": 1.0,
+      "chunk_hit@1": 1.0,
+      "chunk_hit@3": 1.0
+    },
+    "northstar-commerce": {
+      "cases": 10,
+      "document_hit@1": 1.0,
+      "document_hit@3": 1.0,
+      "chunk_hit@1": 1.0,
+      "chunk_hit@3": 1.0
+    }
+  },
+  "cases": {
+    "ns-delay-compensation": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "ns-delay-exclusions": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "ns-cancel": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "ns-return-window": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "ns-return-shipping": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "ns-refund-timing-now": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "ns-refund-timing-june": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "ns-store-credit": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "ns-express-cost": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "ns-po-box": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "bp-delay-compensation-now": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "bp-delay-compensation-june": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "bp-delay-claim-june": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "bp-cancel": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "bp-cancel-support": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "bp-return-window": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "bp-return-shipping": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "bp-refund-timing": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "bp-priority-cost": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    },
+    "bp-express-cost": {
+      "document_rank": 1,
+      "chunk_rank": 1
+    }
+  }
+}

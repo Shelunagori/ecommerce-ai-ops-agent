@@ -7,6 +7,7 @@ chunks are derived from a document by a recorded chunker configuration (``chunki
 import uuid
 from datetime import date, datetime
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     CheckConstraint,
     Date,
@@ -101,6 +102,7 @@ class KnowledgeChunk(UUIDPrimaryKeyMixin, Base):
     )
 
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),  # target of the tenant-aware embedding FK (0003)
         UniqueConstraint("tenant_id", "document_id", "chunk_index"),
         # Tenant-aware FK: a chunk can only reference a document of the SAME tenant.
         ForeignKeyConstraint(
@@ -111,4 +113,66 @@ class KnowledgeChunk(UUIDPrimaryKeyMixin, Base):
         CheckConstraint("chunk_index >= 0", name="chunk_index_non_negative"),
         CheckConstraint("char_count > 0 AND char_count = char_length(content)", name="char_count"),
         CheckConstraint(f"content_hash {SHA256_CHECK}", name="content_hash_format"),
+    )
+
+
+class KnowledgeChunkEmbedding(UUIDPrimaryKeyMixin, Base):
+    """A derived artifact: one chunk's vector in ONE concrete embedding profile.
+
+    Chunks are source-derived knowledge units; embeddings depend on provider, model build
+    (digest), dimensions and input format, so they live in their own table. Several
+    profiles may coexist for the same chunk; rows are never updated.
+    """
+
+    __tablename__ = "knowledge_chunk_embeddings"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    chunk_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    provider: Mapped[str] = mapped_column(String(32))
+    model: Mapped[str] = mapped_column(String(128))  # configured tag, e.g. "x:latest"
+    model_digest: Mapped[str] = mapped_column(String(64))  # resolved immutable build
+    dimensions: Mapped[int] = mapped_column(Integer)
+    input_version: Mapped[str] = mapped_column(String(40))
+    input_hash: Mapped[str] = mapped_column(String(64))  # sha256 of the embedded text
+    # Generic (unsized) pgvector column: dimensions are recorded per row and enforced by
+    # the vector_dims check, so another profile can use another size later.
+    embedding: Mapped[list[float]] = mapped_column(Vector())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), sort_order=10
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "chunk_id",
+            "provider",
+            "model",
+            "model_digest",
+            "dimensions",
+            "input_version",
+            name="uq_knowledge_chunk_embeddings_profile",
+        ),
+        # Tenant-aware FK: an embedding can only belong to a chunk of the SAME tenant.
+        ForeignKeyConstraint(
+            ["tenant_id", "chunk_id"],
+            ["knowledge_chunks.tenant_id", "knowledge_chunks.id"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("dimensions BETWEEN 1 AND 16000", name="dimensions_range"),
+        CheckConstraint("vector_dims(embedding) = dimensions", name="embedding_dims_match"),
+        CheckConstraint("provider ~ '^[a-z0-9-]{1,32}$'", name="provider_format"),
+        CheckConstraint("input_version ~ '^[a-z0-9-]{1,40}$'", name="input_version_format"),
+        CheckConstraint(f"model_digest {SHA256_CHECK}", name="model_digest_format"),
+        CheckConstraint(f"input_hash {SHA256_CHECK}", name="input_hash_format"),
+        # Plain btree filter index for profile-scoped search; deliberately NO ANN index
+        # (HNSW / IVFFlat) in Step 8: exact search is the evaluation ground truth.
+        Index(
+            "ix_knowledge_chunk_embeddings_tenant_profile",
+            "tenant_id",
+            "provider",
+            "model",
+            "model_digest",
+            "dimensions",
+            "input_version",
+        ),
     )

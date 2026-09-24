@@ -156,9 +156,14 @@ def test_ollama_config_carries_no_key():
 
 
 def test_provider_specifics_do_not_leak_outside_the_factory():
-    """Only factory.py / classify.py may know about concrete provider SDKs."""
+    """Only the LLM factory/classifier and (Step 8) the embedding provider module may know
+    about concrete provider SDKs."""
     root = Path(__file__).resolve().parents[2]
-    allowed = {"app/agent/llm/factory.py", "app/agent/llm/classify.py"}
+    allowed = {
+        "app/agent/llm/factory.py",
+        "app/agent/llm/classify.py",
+        "app/knowledge/embeddings/provider.py",
+    }
     pattern = re.compile(
         r"^\s*(from|import)\s+(langchain_ollama|langchain_google_genai|ollama|google)\b", re.M
     )
