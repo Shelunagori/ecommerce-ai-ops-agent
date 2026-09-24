@@ -1,39 +1,45 @@
 # CI/CD
 
-One workflow, [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), holds CI and the gated
-deployment jobs. Nothing deploys unless a maintainer turns it on (repository variables) and
-the protected `production` environment approves it. **No deployment has been run from this
-repository yet.**
+```
+git push main
+  → GitHub Actions CI (backend, frontend, e2e, security)
+  → Railway native GitHub integration deploys the backend (root directory `backend`)
+  → Vercel native Git integration deploys the frontend (root directory `frontend`)
+```
+
+GitHub Actions ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) only **tests**; it
+never deploys and uses no secrets. Deployment is done by Railway and Vercel themselves when
+`main` changes.
 
 ```mermaid
 flowchart LR
-  subgraph CI["CI (pull requests and main)"]
-    B[backend] 
+  P[git push main] --> CI
+  subgraph CI["GitHub Actions CI"]
+    B[backend]
     F[frontend]
     E[e2e]
     S[security]
   end
-  B & F & E & S --> DB[deploy-backend<br/>Railway]
-  B & F & E & S --> DF[deploy-frontend<br/>Vercel]
-  DB -. "must not fail" .-> DF
-  DB & DF --- ENV{{"GitHub Environment: production<br/>(approval + secrets)"}}
+  P --> R["Railway autodeploy<br/>backend/Dockerfile + railway.json"]
+  P --> V["Vercel autodeploy<br/>frontend (Next.js)"]
+  CI -. "optional gate: Railway Wait for CI /<br/>Vercel Deployment Checks" .-> R & V
 ```
 
 ## Triggers
 
-| Event | Jobs that run |
+| Event | What runs |
 | --- | --- |
-| Pull request targeting `main` (incl. forks) | `backend`, `frontend`, `e2e`, `security`. Deploy jobs are **skipped** (they never run for PRs and no deploy secret is available to them). |
-| Push to `main` | the four CI jobs, then `deploy-backend` → `deploy-frontend` if enabled and approved |
-| Manual *Run workflow* on `main` (`workflow_dispatch`) | same as a push: full CI first, then the gated deploys |
+| Pull request targeting `main` (incl. forks) | CI: `backend`, `frontend`, `e2e`, `security`. Vercel may build a preview deployment; Railway deploys nothing. |
+| Push to `main` | CI, and in parallel Railway and Vercel production deploys |
+| Manual *Run workflow* (`workflow_dispatch`) | CI only |
 
 * **No path filters.** Every run produces the same four check names, so a required check can
   never "disappear" and block a merge. **(V)**
-* **Concurrency.** A newer commit cancels obsolete CI on the same pull request. Runs on `main`
-  are never cancelled; each deploy job has its own concurrency group (`deploy-production-*`),
-  so two deploys never overlap and a queued older deploy is superseded by a newer one.
+* **Concurrency.** A newer commit cancels obsolete CI on the same pull request; runs on `main`
+  are never cancelled.
 * **Permissions.** `contents: read` for the whole workflow; no job asks for more. Every
-  checkout uses `persist-credentials: false`. No `pull_request_target`, no `workflow_run`.
+  checkout uses `persist-credentials: false`. No `pull_request_target`, no `workflow_run`, no
+  secrets.
 
 ## CI jobs (stable names for branch protection)
 
@@ -51,99 +57,72 @@ never share (or reset) the same database.
 
 * Live-provider tests (`RUN_OLLAMA_INTEGRATION`, `RUN_GEMINI_INTEGRATION`): no Ollama, no
   Gemini key — they stay **skipped** (visible in the `-rs` summary), never faked.
-* Anything needing Supabase, Railway or Vercel credentials (only the deploy jobs use those).
+* Anything needing Supabase, Railway or Vercel credentials: CI has none.
 * `docker build`: Railway builds the image from `backend/Dockerfile` on deploy.
 * The mutation runs from `COMPLETION_STATUS.md` (developer tooling, minutes of full-suite
   runs per mutation).
 
-## CD design
+## Deployment (native integrations)
 
-**Choice (V):** deploy jobs live in the same workflow and `needs:` all four CI jobs of the
-same run, instead of a separate `workflow_run` workflow. It is simpler, the deployed commit
-is exactly the tested commit, a failed CI job skips the deploy, and there are none of the
-`workflow_run` pitfalls (trusted context running for fork-triggered runs, default-branch
-workflow code, lost commit linkage).
+### Railway — backend
 
-A deploy job runs only when **all** hold:
+* Service connected to this GitHub repository, branch `main`, **Root Directory `backend`**,
+  **config file path `/backend/railway.json`** (Railway's config path does not follow the root
+  directory). Autodeploy on.
+* Railway builds `backend/Dockerfile`. `railway.json` runs the pre-deploy step
+  `python -m scripts.predeploy` (`check_env` → `alembic upgrade head` →
+  `setup_checkpoints`) before the new container receives traffic — **the only place
+  migrations run**. The new release goes live only if that step succeeds and
+  `GET /health/ready` passes; otherwise the previous deployment keeps serving.
+* `watchPatterns: ["/backend/**"]` in `railway.json`: commits that touch only the frontend or
+  docs do not redeploy the backend.
 
-1. the ref is `refs/heads/main` and the event is `push` or `workflow_dispatch`;
-2. `backend`, `frontend`, `e2e` and `security` succeeded in this run;
-3. the repository variable `RAILWAY_DEPLOY_ENABLED` / `VERCEL_DEPLOY_ENABLED` is `true`
-   (unset → the job shows as *skipped*, CI stays green);
-4. the `production` environment's protection rules pass (required reviewers, branch rule).
+### Vercel — frontend
 
-`deploy-frontend` runs after `deploy-backend`; it also runs when backend CD is disabled
-(skipped) but never after a failed backend deploy.
+* Project imported from this repository, **Root Directory `frontend`**, production branch
+  `main`, Node.js 22.x or 24.x. `frontend/vercel.json` contains no Git restriction, so the
+  native integration deploys `main` to production and other branches as previews.
+* `NEXT_PUBLIC_*` values (public only) are set in the Vercel project's environment settings;
+  no server secret is ever a `NEXT_PUBLIC_*` variable.
 
-### Railway (backend)
+### CI and deploys run in parallel — optional gates
 
-* Reuses the existing mechanism: `backend/Dockerfile` + `backend/railway.json`. The job only
-  uploads the source with the pinned Railway CLI (`railway up --ci --service …`) using an
-  environment-scoped **project token**.
-* **Migrations run in exactly one place:** Railway's `preDeployCommand`
-  (`python -m scripts.predeploy` = `check_env` → `alembic upgrade head` →
-  `setup_checkpoints`). The workflow never runs migrations.
-* Railway keeps the previous deployment serving unless the pre-deploy step succeeds and the
-  new container passes `GET /health/ready`. After the upload the job polls
-  `$BACKEND_URL/health/ready` until it reports `ready`.
-* Limitation: `railway up --ci` returns after the build; the smoke check verifies whatever
-  deployment is serving. If the new release failed its pre-deploy or healthcheck, Railway
-  keeps the old one live — check the deployment status in Railway.
-* **Turn off Railway's own GitHub autodeploy** for this service (or don't connect the repo),
-  otherwise every push deploys twice and the second path skips the approval gate.
+With plain autodeploy, Railway and Vercel start deploying `main` at the same time as CI, so a
+commit whose CI fails can still be deployed. Branch protection (below) is the primary guard:
+nothing reaches `main` without a green pull request. To also stop a red `main` commit from
+going live, enable (dashboard settings, no code changes):
 
-### Vercel (frontend)
+* **Railway → service → Settings → *Wait for CI***: the deployment waits in `WAITING` until
+  the GitHub Actions workflows for the commit finish, and is skipped if one fails.
+* **Vercel → project → Settings → Build and Deployment → *Deployment Checks***: add the
+  GitHub checks `backend`, `frontend`, `e2e`, `security`; the production build is created but
+  only promoted to the production domain once they pass.
 
-* The documented CLI pattern: `vercel pull --environment=production` → `vercel build --prod`
-  → `vercel deploy --prebuilt --prod`, pinned CLI, run from the repository root (the Vercel
-  project's Root Directory is `frontend`).
-* Build-time `NEXT_PUBLIC_*` values come from the Vercel project's **Production**
-  environment (public values only; see `DEPLOYMENT.md`). No server secret is ever a
-  `NEXT_PUBLIC_*` variable.
-* `frontend/vercel.json` sets `git.deploymentEnabled.main = false`: the Vercel Git integration
-  may still build preview deployments for branches, but production (`main`) deploys only come
-  from this gated workflow.
+### Secrets
 
-## GitHub configuration (names only, no values)
-
-**Environment:** `production`, with *Required reviewers* and *Deployment branches: `main`
-only*.
-
-| Kind | Name | Scope | Used by |
-| --- | --- | --- | --- |
-| Secret | `RAILWAY_TOKEN` | environment `production` | deploy-backend (Railway **project token** for the production environment) |
-| Secret | `VERCEL_TOKEN` | environment `production` | deploy-frontend |
-| Variable | `RAILWAY_SERVICE` | environment `production` | deploy-backend (service name or id) |
-| Variable | `BACKEND_URL` | environment `production` | deploy-backend smoke check, environment URL (`https://…`) |
-| Variable | `VERCEL_ORG_ID` | environment `production` | deploy-frontend |
-| Variable | `VERCEL_PROJECT_ID` | environment `production` | deploy-frontend |
-| Variable | `FRONTEND_URL` | environment `production` | environment URL (optional) |
-| Variable | `RAILWAY_DEPLOY_ENABLED` | **repository** | `true` turns backend CD on |
-| Variable | `VERCEL_DEPLOY_ENABLED` | **repository** | `true` turns frontend CD on |
-
-The enable switches are repository variables because job-level `if:` is evaluated before a job
-enters its environment. Application runtime secrets (`GEMINI_API_KEY`, `DATABASE_URL`, …) are
-**not** GitHub secrets: they live in Railway's service variables (see `DEPLOYMENT.md`).
-CI itself needs no secret at all.
+GitHub needs **no** secrets or deployment variables for this flow. Runtime configuration lives
+in the platforms: Railway service variables (`DATABASE_URL`, `GEMINI_API_KEY`, …) and Vercel
+project environment variables (`NEXT_PUBLIC_*`). Names are listed in
+[DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Branch protection (recommended for `main`; not applied automatically)
 
 * Require a pull request before merging (at least one approval recommended).
 * Required status checks: **`backend`**, **`frontend`**, **`e2e`**, **`security`**.
-* Require branches to be up to date before merging (the deploy runs on the merge result).
+* Require branches to be up to date before merging.
 * Block force pushes; block deletion.
 * Optionally: require conversation resolution and linear history; include administrators.
-* Environment `production`: required reviewers, deployment branch rule `main` only.
 
 ## Operating it
 
-* **Re-run a deploy:** in *Actions*, open the run for the commit and *Re-run failed jobs*
-  (only the deploy job runs again; CI results of that run are reused), or *Run workflow* on
-  `main` to test and deploy the current head again.
-* **Rollback:** Railway — *Redeploy* the previous successful deployment from the service's
-  deployment list (the schema only ever moves forward; migrations 0004–0006 are additive, so an
-  older image runs on the newer schema). Vercel — *Instant Rollback* / promote the previous
-  production deployment. Then fix forward with a revert commit through a normal pull request.
-* **Pause CD:** set `RAILWAY_DEPLOY_ENABLED` / `VERCEL_DEPLOY_ENABLED` to anything but `true`.
-* **Bump tool versions:** `UV_VERSION`, `GITLEAKS_VERSION` + `GITLEAKS_SHA256`,
-  `PIP_AUDIT_VERSION`, `RAILWAY_CLI_VERSION`, `VERCEL_CLI_VERSION` at the top of their jobs.
+* **Re-run CI:** *Re-run jobs* on the run in *Actions*, or *Run workflow*.
+* **Redeploy:** Railway — *Redeploy* on the service's latest deployment; Vercel — *Redeploy*
+  on the production deployment. (A new commit on `main` redeploys automatically — the backend only when `backend/` changed.)
+* **Rollback:** Railway — redeploy the previous successful deployment from the service's
+  deployment list (the schema only moves forward; migrations 0004–0006 are additive, so an
+  older image runs on the newer schema). Vercel — *Instant Rollback* to the previous
+  production deployment. Then fix forward with a revert commit through a pull request.
+* **Pause deploys:** turn off autodeploy on the Railway service / disconnect or pause the
+  Vercel Git integration.
+* **Bump CI tool versions:** `UV_VERSION`, `GITLEAKS_VERSION` + `GITLEAKS_SHA256`,
+  `PIP_AUDIT_VERSION` in `ci.yml`.

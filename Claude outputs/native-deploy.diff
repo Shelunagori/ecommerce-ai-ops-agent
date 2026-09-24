@@ -1,0 +1,444 @@
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -1,10 +1,9 @@
+-# CommerceOps AI — CI and gated CD (see docs/CI_CD.md).
++# CommerceOps AI — CI only (see docs/CI_CD.md).
+ #
+-# One workflow, stable job names for branch protection: backend, frontend, e2e, security.
+-# deploy-backend / deploy-frontend run ONLY for main (push or manual dispatch), ONLY after all
+-# four CI jobs succeeded in this same run, ONLY when enabled by a repository variable, and ONLY
+-# through the protected `production` GitHub Environment (approval + secrets live there).
+-# Pull requests (including forks) never reach a deploy job and never receive deploy secrets.
++# Stable job names for branch protection: backend, frontend, e2e, security.
++# Deployment is NOT done here: Railway (root directory `backend`) and Vercel (root directory
++# `frontend`) deploy `main` through their native GitHub integrations. This workflow uses no
++# secrets and only reads the repository.
+ name: CI
+ 
+ on:
+@@ -12,14 +11,14 @@
+     branches: [main]
+   push:
+     branches: [main]
+-  workflow_dispatch: # manual re-run on main: full CI, then the gated deploy jobs
++  workflow_dispatch: # manual CI run on any branch
+ 
+ # Least privilege by default; no job needs more than read access to the repository.
+ permissions:
+   contents: read
+ 
+ # A newer commit cancels obsolete CI for the same pull request. Pushes to main are grouped by
+-# commit and never cancelled (a deploy must not be interrupted half-way).
++# commit and never cancelled, so every main commit gets a complete result.
+ concurrency:
+   group: ci-${{ github.event.pull_request.number || github.sha }}
+   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+@@ -221,109 +220,3 @@
+       - name: npm audit (production dependencies, high and above)
+         working-directory: frontend
+         run: npm audit --omit=dev --audit-level=high
+-
+-  # ---------------------------------------------------------------------------------------------
+-  # CD. Deploy jobs need every CI job of THIS run, so a failing commit can never deploy.
+-  deploy-backend:
+-    name: deploy-backend
+-    needs: [backend, frontend, e2e, security]
+-    if: >-
+-      github.ref == 'refs/heads/main'
+-      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+-      && vars.RAILWAY_DEPLOY_ENABLED == 'true'
+-    runs-on: ubuntu-24.04
+-    timeout-minutes: 30
+-    environment:
+-      name: production
+-      url: ${{ vars.BACKEND_URL }}
+-    concurrency:
+-      group: deploy-production-backend
+-      cancel-in-progress: false
+-    env:
+-      RAILWAY_CLI_VERSION: "5.62.1"
+-    steps:
+-      - uses: actions/checkout@v7
+-        with:
+-          persist-credentials: false
+-      - uses: actions/setup-node@v7
+-        with:
+-          node-version-file: frontend/.nvmrc
+-      - name: Install Railway CLI (pinned)
+-        run: npm install --global "@railway/cli@${RAILWAY_CLI_VERSION}"
+-      - name: Deploy (Railway builds backend/Dockerfile; railway.json runs the pre-deploy step)
+-        env:
+-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }} # project token scoped to production
+-          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+-        run: |
+-          set -euo pipefail
+-          : "${RAILWAY_TOKEN:?RAILWAY_TOKEN secret is not set in the production environment}"
+-          : "${RAILWAY_SERVICE:?RAILWAY_SERVICE variable is not set in the production environment}"
+-          # Uploads the repository; the service's Root Directory (backend) and config file
+-          # (/backend/railway.json) decide what is built. Migrations and checkpoint setup run
+-          # ONLY in Railway's preDeployCommand (python -m scripts.predeploy), never here.
+-          # Never pass -y: without a valid token the CLI must fail, not create a new project.
+-          railway up --ci --service "$RAILWAY_SERVICE" --message "github-actions ${GITHUB_SHA::12}"
+-      - name: Smoke check (liveness + readiness)
+-        env:
+-          BACKEND_URL: ${{ vars.BACKEND_URL }}
+-        run: |
+-          set -euo pipefail
+-          : "${BACKEND_URL:?BACKEND_URL variable is not set in the production environment}"
+-          for _ in $(seq 1 30); do
+-            if curl -fsS "$BACKEND_URL/health/ready" | grep -q '"status":"ready"'; then
+-              curl -fsS "$BACKEND_URL/health"
+-              echo; echo "backend ready"; exit 0
+-            fi
+-            sleep 10
+-          done
+-          echo "backend did not report ready" >&2; exit 1
+-
+-  deploy-frontend:
+-    name: deploy-frontend
+-    needs: [backend, frontend, e2e, security, deploy-backend]
+-    # The API deploys first; the frontend still deploys when backend CD is disabled
+-    # (skipped), but never after a failed backend deploy.
+-    if: >-
+-      !cancelled()
+-      && needs.backend.result == 'success' && needs.frontend.result == 'success'
+-      && needs.e2e.result == 'success' && needs.security.result == 'success'
+-      && needs.deploy-backend.result != 'failure'
+-      && github.ref == 'refs/heads/main'
+-      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+-      && vars.VERCEL_DEPLOY_ENABLED == 'true'
+-    runs-on: ubuntu-24.04
+-    timeout-minutes: 20
+-    environment:
+-      name: production
+-      url: ${{ vars.FRONTEND_URL }}
+-    concurrency:
+-      group: deploy-production-frontend
+-      cancel-in-progress: false
+-    env:
+-      VERCEL_CLI_VERSION: "59.26.0"
+-      VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+-      VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+-      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+-      NEXT_TELEMETRY_DISABLED: "1"
+-    steps:
+-      - uses: actions/checkout@v7
+-        with:
+-          persist-credentials: false
+-      - uses: actions/setup-node@v7
+-        with:
+-          node-version-file: frontend/.nvmrc
+-      - name: Install Vercel CLI (pinned)
+-        run: npm install --global "vercel@${VERCEL_CLI_VERSION}"
+-      - name: Check deployment configuration
+-        run: |
+-          : "${VERCEL_TOKEN:?VERCEL_TOKEN secret is not set in the production environment}"
+-          : "${VERCEL_ORG_ID:?VERCEL_ORG_ID variable is not set in the production environment}"
+-          : "${VERCEL_PROJECT_ID:?VERCEL_PROJECT_ID variable is not set in the production environment}"
+-      # The project's Root Directory is `frontend`; its NEXT_PUBLIC_* values come from the
+-      # Vercel project's Production environment (public values only).
+-      - name: Pull production project settings
+-        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+-      - name: Build
+-        run: vercel build --prod --token="$VERCEL_TOKEN"
+-      - name: Deploy prebuilt output
+-        run: vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
+--- a/frontend/vercel.json
++++ b/frontend/vercel.json
+@@ -1,8 +1,3 @@
+ {
+-  "$schema": "https://openapi.vercel.sh/vercel.json",
+-  "git": {
+-    "deploymentEnabled": {
+-      "main": false
+-    }
+-  }
++  "$schema": "https://openapi.vercel.sh/vercel.json"
+ }
+--- a/README.md
++++ b/README.md
+@@ -117,8 +117,8 @@
+ | Mutations | see COMPLETION_STATUS | each safety property has at least one mutation that turns the suite red |
+ 
+ GitHub Actions ([`ci.yml`](.github/workflows/ci.yml)) runs `backend`, `frontend`, `e2e` and
+-`security` on every pull request and push to `main`; gated Railway/Vercel deploy jobs follow
+-on `main` only after all four pass and the `production` environment approves. See
++`security` on every pull request and push to `main`. Deployment is native: Railway
++(root `backend`) and Vercel (root `frontend`) auto-deploy `main`. See
+ [docs/CI_CD.md](docs/CI_CD.md).
+ 
+ ## Documentation
+@@ -129,7 +129,7 @@
+ | [DEMO_SCENARIOS.md](docs/DEMO_SCENARIOS.md) | five demo walkthroughs |
+ | [DEVELOPMENT.md](docs/DEVELOPMENT.md) | setup, CLI reference, tests |
+ | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Railway + Supabase + Vercel runbook (not executed) |
+-| [CI_CD.md](docs/CI_CD.md) | GitHub Actions CI, gated CD, environments/secrets (names), branch protection, rollback |
++| [CI_CD.md](docs/CI_CD.md) | GitHub Actions CI, native Railway/Vercel deploys, branch protection, rollback |
+ | [SECURITY.md](docs/SECURITY.md) | trust boundaries, controls, review results |
+ | [OBSERVABILITY.md](docs/OBSERVABILITY.md) | logs, run records, audit trail, optional LangSmith |
+ | [pending-items.md](docs/pending-items.md) | known limitations and follow-ups |
+--- a/docs/DEPLOYMENT.md
++++ b/docs/DEPLOYMENT.md
+@@ -97,12 +97,12 @@
+ 1. **Supabase project** (free tier is enough). Copy the session-pooler connection string and
+    the project URL. In *Authentication*, create the demo users (email + password) and note each
+    user's id (UUID) — that is the JWT `sub`.
+-2. **Railway service** from this repo: root directory `backend`; set the service's config
+-   file path to `/backend/railway.json` (Railway's config file path does not follow the root
+-   directory; it must be absolute). Set the variables above. **Disable Railway's GitHub
+-   autodeploy** for the service: releases come from the gated `deploy-backend` job
+-   (`docs/CI_CD.md`), which uploads with `railway up` using a production project token.
+-3. **Deploy** (merge to `main` with CD enabled and approved, or *Run workflow* on `main`).
++2. **Railway service** from this repo (native GitHub integration): branch `main`, root
++   directory `backend`, config file path `/backend/railway.json` (Railway's config file path
++   does not follow the root directory; it must be absolute), **autodeploy on**. Set the
++   variables above. Recommended: enable *Wait for CI* so a commit whose GitHub Actions CI
++   failed is not deployed (`docs/CI_CD.md`).
++3. **Deploy** = push (merge) to `main`. Railway builds `backend/Dockerfile` and
+    `railway.json` runs the pre-deploy step before the new container receives traffic — the
+    only place migrations run:
+    `python -m scripts.predeploy` = `check_env` → `alembic upgrade head` →
+@@ -122,14 +122,15 @@
+    uv run python -m scripts.grant_membership --tenant bluepeak-retail   --subject <user-uuid> --role member
+    ```
+ 
+-5. **Vercel project** from this repo: root directory `frontend`; Node.js 22.x or 24.x (from
+-   `engines`; Node 20 is unsupported); set the four `NEXT_PUBLIC_*` variables in its
+-   **Production** environment. `frontend/vercel.json` stops the Git integration from
+-   deploying `main`; production deploys come from the gated `deploy-frontend` job. Add the
+-   Vercel origin to Railway's `CORS_ORIGINS`.
+-6. **GitHub:** create the `production` environment (required reviewers, `main` only), its
+-   secrets/variables and the two repository enable switches — names in `docs/CI_CD.md`.
+-7. **Smoke checks** (below; `deploy-backend` also polls `/health/ready`).
++5. **Vercel project** from this repo (native Git integration): root directory `frontend`,
++   production branch `main`, Node.js 22.x or 24.x (from `engines`; Node 20 is unsupported);
++   set the four `NEXT_PUBLIC_*` variables in its **Production** environment. Every push to
++   `main` deploys to production. Recommended: add the GitHub checks `backend`, `frontend`,
++   `e2e`, `security` as *Deployment Checks* so a red commit is not promoted. Add the Vercel
++   origin to Railway's `CORS_ORIGINS`.
++6. **GitHub:** protect `main` (required checks `backend`, `frontend`, `e2e`, `security`; see
++   `docs/CI_CD.md`). No GitHub secrets are needed.
++7. **Smoke checks** (below).
+ 
+ ## Smoke checks
+ 
+--- a/docs/CI_CD.md
++++ b/docs/CI_CD.md
+@@ -1,39 +1,45 @@
+ # CI/CD
+ 
+-One workflow, [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), holds CI and the gated
+-deployment jobs. Nothing deploys unless a maintainer turns it on (repository variables) and
+-the protected `production` environment approves it. **No deployment has been run from this
+-repository yet.**
++```
++git push main
++  → GitHub Actions CI (backend, frontend, e2e, security)
++  → Railway native GitHub integration deploys the backend (root directory `backend`)
++  → Vercel native Git integration deploys the frontend (root directory `frontend`)
++```
++
++GitHub Actions ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) only **tests**; it
++never deploys and uses no secrets. Deployment is done by Railway and Vercel themselves when
++`main` changes.
+ 
+ ```mermaid
+ flowchart LR
+-  subgraph CI["CI (pull requests and main)"]
+-    B[backend] 
++  P[git push main] --> CI
++  subgraph CI["GitHub Actions CI"]
++    B[backend]
+     F[frontend]
+     E[e2e]
+     S[security]
+   end
+-  B & F & E & S --> DB[deploy-backend<br/>Railway]
+-  B & F & E & S --> DF[deploy-frontend<br/>Vercel]
+-  DB -. "must not fail" .-> DF
+-  DB & DF --- ENV{{"GitHub Environment: production<br/>(approval + secrets)"}}
++  P --> R["Railway autodeploy<br/>backend/Dockerfile + railway.json"]
++  P --> V["Vercel autodeploy<br/>frontend (Next.js)"]
++  CI -. "optional gate: Railway Wait for CI /<br/>Vercel Deployment Checks" .-> R & V
+ ```
+ 
+ ## Triggers
+ 
+-| Event | Jobs that run |
++| Event | What runs |
+ | --- | --- |
+-| Pull request targeting `main` (incl. forks) | `backend`, `frontend`, `e2e`, `security`. Deploy jobs are **skipped** (they never run for PRs and no deploy secret is available to them). |
+-| Push to `main` | the four CI jobs, then `deploy-backend` → `deploy-frontend` if enabled and approved |
+-| Manual *Run workflow* on `main` (`workflow_dispatch`) | same as a push: full CI first, then the gated deploys |
++| Pull request targeting `main` (incl. forks) | CI: `backend`, `frontend`, `e2e`, `security`. Vercel may build a preview deployment; Railway deploys nothing. |
++| Push to `main` | CI, and in parallel Railway and Vercel production deploys |
++| Manual *Run workflow* (`workflow_dispatch`) | CI only |
+ 
+ * **No path filters.** Every run produces the same four check names, so a required check can
+   never "disappear" and block a merge. **(V)**
+-* **Concurrency.** A newer commit cancels obsolete CI on the same pull request. Runs on `main`
+-  are never cancelled; each deploy job has its own concurrency group (`deploy-production-*`),
+-  so two deploys never overlap and a queued older deploy is superseded by a newer one.
++* **Concurrency.** A newer commit cancels obsolete CI on the same pull request; runs on `main`
++  are never cancelled.
+ * **Permissions.** `contents: read` for the whole workflow; no job asks for more. Every
+-  checkout uses `persist-credentials: false`. No `pull_request_target`, no `workflow_run`.
++  checkout uses `persist-credentials: false`. No `pull_request_target`, no `workflow_run`, no
++  secrets.
+ 
+ ## CI jobs (stable names for branch protection)
+ 
+@@ -51,99 +57,72 @@
+ 
+ * Live-provider tests (`RUN_OLLAMA_INTEGRATION`, `RUN_GEMINI_INTEGRATION`): no Ollama, no
+   Gemini key — they stay **skipped** (visible in the `-rs` summary), never faked.
+-* Anything needing Supabase, Railway or Vercel credentials (only the deploy jobs use those).
++* Anything needing Supabase, Railway or Vercel credentials: CI has none.
+ * `docker build`: Railway builds the image from `backend/Dockerfile` on deploy.
+ * The mutation runs from `COMPLETION_STATUS.md` (developer tooling, minutes of full-suite
+   runs per mutation).
+ 
+-## CD design
++## Deployment (native integrations)
++
++### Railway — backend
+ 
+-**Choice (V):** deploy jobs live in the same workflow and `needs:` all four CI jobs of the
+-same run, instead of a separate `workflow_run` workflow. It is simpler, the deployed commit
+-is exactly the tested commit, a failed CI job skips the deploy, and there are none of the
+-`workflow_run` pitfalls (trusted context running for fork-triggered runs, default-branch
+-workflow code, lost commit linkage).
+-
+-A deploy job runs only when **all** hold:
+-
+-1. the ref is `refs/heads/main` and the event is `push` or `workflow_dispatch`;
+-2. `backend`, `frontend`, `e2e` and `security` succeeded in this run;
+-3. the repository variable `RAILWAY_DEPLOY_ENABLED` / `VERCEL_DEPLOY_ENABLED` is `true`
+-   (unset → the job shows as *skipped*, CI stays green);
+-4. the `production` environment's protection rules pass (required reviewers, branch rule).
+-
+-`deploy-frontend` runs after `deploy-backend`; it also runs when backend CD is disabled
+-(skipped) but never after a failed backend deploy.
+-
+-### Railway (backend)
+-
+-* Reuses the existing mechanism: `backend/Dockerfile` + `backend/railway.json`. The job only
+-  uploads the source with the pinned Railway CLI (`railway up --ci --service …`) using an
+-  environment-scoped **project token**.
+-* **Migrations run in exactly one place:** Railway's `preDeployCommand`
+-  (`python -m scripts.predeploy` = `check_env` → `alembic upgrade head` →
+-  `setup_checkpoints`). The workflow never runs migrations.
+-* Railway keeps the previous deployment serving unless the pre-deploy step succeeds and the
+-  new container passes `GET /health/ready`. After the upload the job polls
+-  `$BACKEND_URL/health/ready` until it reports `ready`.
+-* Limitation: `railway up --ci` returns after the build; the smoke check verifies whatever
+-  deployment is serving. If the new release failed its pre-deploy or healthcheck, Railway
+-  keeps the old one live — check the deployment status in Railway.
+-* **Turn off Railway's own GitHub autodeploy** for this service (or don't connect the repo),
+-  otherwise every push deploys twice and the second path skips the approval gate.
+-
+-### Vercel (frontend)
+-
+-* The documented CLI pattern: `vercel pull --environment=production` → `vercel build --prod`
+-  → `vercel deploy --prebuilt --prod`, pinned CLI, run from the repository root (the Vercel
+-  project's Root Directory is `frontend`).
+-* Build-time `NEXT_PUBLIC_*` values come from the Vercel project's **Production**
+-  environment (public values only; see `DEPLOYMENT.md`). No server secret is ever a
+-  `NEXT_PUBLIC_*` variable.
+-* `frontend/vercel.json` sets `git.deploymentEnabled.main = false`: the Vercel Git integration
+-  may still build preview deployments for branches, but production (`main`) deploys only come
+-  from this gated workflow.
+-
+-## GitHub configuration (names only, no values)
+-
+-**Environment:** `production`, with *Required reviewers* and *Deployment branches: `main`
+-only*.
+-
+-| Kind | Name | Scope | Used by |
+-| --- | --- | --- | --- |
+-| Secret | `RAILWAY_TOKEN` | environment `production` | deploy-backend (Railway **project token** for the production environment) |
+-| Secret | `VERCEL_TOKEN` | environment `production` | deploy-frontend |
+-| Variable | `RAILWAY_SERVICE` | environment `production` | deploy-backend (service name or id) |
+-| Variable | `BACKEND_URL` | environment `production` | deploy-backend smoke check, environment URL (`https://…`) |
+-| Variable | `VERCEL_ORG_ID` | environment `production` | deploy-frontend |
+-| Variable | `VERCEL_PROJECT_ID` | environment `production` | deploy-frontend |
+-| Variable | `FRONTEND_URL` | environment `production` | environment URL (optional) |
+-| Variable | `RAILWAY_DEPLOY_ENABLED` | **repository** | `true` turns backend CD on |
+-| Variable | `VERCEL_DEPLOY_ENABLED` | **repository** | `true` turns frontend CD on |
+-
+-The enable switches are repository variables because job-level `if:` is evaluated before a job
+-enters its environment. Application runtime secrets (`GEMINI_API_KEY`, `DATABASE_URL`, …) are
+-**not** GitHub secrets: they live in Railway's service variables (see `DEPLOYMENT.md`).
+-CI itself needs no secret at all.
++* Service connected to this GitHub repository, branch `main`, **Root Directory `backend`**,
++  **config file path `/backend/railway.json`** (Railway's config path does not follow the root
++  directory). Autodeploy on.
++* Railway builds `backend/Dockerfile`. `railway.json` runs the pre-deploy step
++  `python -m scripts.predeploy` (`check_env` → `alembic upgrade head` →
++  `setup_checkpoints`) before the new container receives traffic — **the only place
++  migrations run**. The new release goes live only if that step succeeds and
++  `GET /health/ready` passes; otherwise the previous deployment keeps serving.
++* `watchPatterns: ["/backend/**"]` in `railway.json`: commits that touch only the frontend or
++  docs do not redeploy the backend.
++
++### Vercel — frontend
++
++* Project imported from this repository, **Root Directory `frontend`**, production branch
++  `main`, Node.js 22.x or 24.x. `frontend/vercel.json` contains no Git restriction, so the
++  native integration deploys `main` to production and other branches as previews.
++* `NEXT_PUBLIC_*` values (public only) are set in the Vercel project's environment settings;
++  no server secret is ever a `NEXT_PUBLIC_*` variable.
++
++### CI and deploys run in parallel — optional gates
++
++With plain autodeploy, Railway and Vercel start deploying `main` at the same time as CI, so a
++commit whose CI fails can still be deployed. Branch protection (below) is the primary guard:
++nothing reaches `main` without a green pull request. To also stop a red `main` commit from
++going live, enable (dashboard settings, no code changes):
++
++* **Railway → service → Settings → *Wait for CI***: the deployment waits in `WAITING` until
++  the GitHub Actions workflows for the commit finish, and is skipped if one fails.
++* **Vercel → project → Settings → Build and Deployment → *Deployment Checks***: add the
++  GitHub checks `backend`, `frontend`, `e2e`, `security`; the production build is created but
++  only promoted to the production domain once they pass.
++
++### Secrets
++
++GitHub needs **no** secrets or deployment variables for this flow. Runtime configuration lives
++in the platforms: Railway service variables (`DATABASE_URL`, `GEMINI_API_KEY`, …) and Vercel
++project environment variables (`NEXT_PUBLIC_*`). Names are listed in
++[DEPLOYMENT.md](DEPLOYMENT.md).
+ 
+ ## Branch protection (recommended for `main`; not applied automatically)
+ 
+ * Require a pull request before merging (at least one approval recommended).
+ * Required status checks: **`backend`**, **`frontend`**, **`e2e`**, **`security`**.
+-* Require branches to be up to date before merging (the deploy runs on the merge result).
++* Require branches to be up to date before merging.
+ * Block force pushes; block deletion.
+ * Optionally: require conversation resolution and linear history; include administrators.
+-* Environment `production`: required reviewers, deployment branch rule `main` only.
+ 
+ ## Operating it
+ 
+-* **Re-run a deploy:** in *Actions*, open the run for the commit and *Re-run failed jobs*
+-  (only the deploy job runs again; CI results of that run are reused), or *Run workflow* on
+-  `main` to test and deploy the current head again.
+-* **Rollback:** Railway — *Redeploy* the previous successful deployment from the service's
+-  deployment list (the schema only ever moves forward; migrations 0004–0006 are additive, so an
+-  older image runs on the newer schema). Vercel — *Instant Rollback* / promote the previous
+-  production deployment. Then fix forward with a revert commit through a normal pull request.
+-* **Pause CD:** set `RAILWAY_DEPLOY_ENABLED` / `VERCEL_DEPLOY_ENABLED` to anything but `true`.
+-* **Bump tool versions:** `UV_VERSION`, `GITLEAKS_VERSION` + `GITLEAKS_SHA256`,
+-  `PIP_AUDIT_VERSION`, `RAILWAY_CLI_VERSION`, `VERCEL_CLI_VERSION` at the top of their jobs.
++* **Re-run CI:** *Re-run jobs* on the run in *Actions*, or *Run workflow*.
++* **Redeploy:** Railway — *Redeploy* on the service's latest deployment; Vercel — *Redeploy*
++  on the production deployment. (A new commit on `main` redeploys automatically — the backend only when `backend/` changed.)
++* **Rollback:** Railway — redeploy the previous successful deployment from the service's
++  deployment list (the schema only moves forward; migrations 0004–0006 are additive, so an
++  older image runs on the newer schema). Vercel — *Instant Rollback* to the previous
++  production deployment. Then fix forward with a revert commit through a pull request.
++* **Pause deploys:** turn off autodeploy on the Railway service / disconnect or pause the
++  Vercel Git integration.
++* **Bump CI tool versions:** `UV_VERSION`, `GITLEAKS_VERSION` + `GITLEAKS_SHA256`,
++  `PIP_AUDIT_VERSION` in `ci.yml`.

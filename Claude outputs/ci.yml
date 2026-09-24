@@ -1,0 +1,222 @@
+# CommerceOps AI — CI only (see docs/CI_CD.md).
+#
+# Stable job names for branch protection: backend, frontend, e2e, security.
+# Deployment is NOT done here: Railway (root directory `backend`) and Vercel (root directory
+# `frontend`) deploy `main` through their native GitHub integrations. This workflow uses no
+# secrets and only reads the repository.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch: # manual CI run on any branch
+
+# Least privilege by default; no job needs more than read access to the repository.
+permissions:
+  contents: read
+
+# A newer commit cancels obsolete CI for the same pull request. Pushes to main are grouped by
+# commit and never cancelled, so every main commit gets a complete result.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_VERSION: "0.12.18" # matches the uv 0.12 image used by backend/Dockerfile
+  UV_LOCKED: "1" # every uv command must use uv.lock unchanged
+  FORCE_COLOR: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------------------------
+  backend:
+    name: backend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17 # same image as docker-compose.yml
+        env: # synthetic CI-only credentials for a throwaway container
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: commerceops_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci -d commerceops_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      # The suite refuses any database whose name does not end in _test.
+      TEST_DATABASE_URL: postgresql://ci:ci@localhost:5432/commerceops_test
+      APP_ENV: test
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Sync dependencies from the lockfile
+        run: uv sync --locked
+      - name: Lockfile is up to date
+        run: uv lock --check
+      - name: Format
+        run: uv run ruff format --check .
+      - name: Lint
+        run: uv run ruff check .
+      - name: "Migrations: clean database -> head"
+        env:
+          DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
+        run: uv run alembic upgrade head
+      - name: "Migrations: models match the migrated schema"
+        env:
+          DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
+        run: uv run alembic check
+      - name: Tests (full deterministic suite; live Ollama/Gemini tests stay skipped)
+        # The suite itself runs downgrade base -> upgrade head (round trip) before seeding.
+        run: uv run pytest -q -p no:cacheprovider -rs --junitxml=pytest-junit.xml
+      - name: Upload test report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-pytest-junit
+          path: backend/pytest-junit.xml
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  frontend:
+    name: frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      # Public, dummy build-time values only (never a server secret in NEXT_PUBLIC_*).
+      NEXT_PUBLIC_API_URL: http://127.0.0.1:8000
+      NEXT_PUBLIC_AUTH_MODE: demo
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install (lockfile, engine-strict)
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: Production build
+        run: npm run build
+
+  # ---------------------------------------------------------------------------------------------
+  e2e:
+    name: e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    # Own job => own runner and own PostgreSQL service container: the harness RESETS this
+    # database and never shares it with the backend job.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: commerceops_e2e_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci -d commerceops_e2e_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      # backend/tests/e2e/server.py migrates, seeds and ingests this database itself.
+      TEST_DATABASE_URL: postgresql://ci:ci@localhost:5432/commerceops_e2e_test
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Backend dependencies
+        working-directory: backend
+        run: uv sync --locked
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Install Chromium for Playwright
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      - name: Browser end-to-end (starts the harness API + Next.js dev server)
+        working-directory: frontend
+        run: npm run test:e2e
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-test-results
+          path: frontend/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  security:
+    name: security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+      PIP_AUDIT_VERSION: "2.10.1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the secret scan covers the whole history, not only the tip
+      - name: Secret scan (gitleaks, full history)
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --no-banner --redact --exit-code 1 .
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Python dependency audit (locked runtime dependencies)
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          uv export --locked --no-dev --no-hashes --no-emit-project -o "$RUNNER_TEMP/requirements.txt"
+          uvx "pip-audit==${PIP_AUDIT_VERSION}" --disable-pip --no-deps \
+            -r "$RUNNER_TEMP/requirements.txt"
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: frontend/.nvmrc
+      - name: npm audit (production dependencies, high and above)
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=high

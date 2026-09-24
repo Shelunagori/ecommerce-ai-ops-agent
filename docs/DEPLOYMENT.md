@@ -97,12 +97,12 @@ project CA). Source: Supabase "Connect to your database" guide (checked Sept 202
 1. **Supabase project** (free tier is enough). Copy the session-pooler connection string and
    the project URL. In *Authentication*, create the demo users (email + password) and note each
    user's id (UUID) — that is the JWT `sub`.
-2. **Railway service** from this repo: root directory `backend`; set the service's config
-   file path to `/backend/railway.json` (Railway's config file path does not follow the root
-   directory; it must be absolute). Set the variables above. **Disable Railway's GitHub
-   autodeploy** for the service: releases come from the gated `deploy-backend` job
-   (`docs/CI_CD.md`), which uploads with `railway up` using a production project token.
-3. **Deploy** (merge to `main` with CD enabled and approved, or *Run workflow* on `main`).
+2. **Railway service** from this repo (native GitHub integration): branch `main`, root
+   directory `backend`, config file path `/backend/railway.json` (Railway's config file path
+   does not follow the root directory; it must be absolute), **autodeploy on**. Set the
+   variables above. Recommended: enable *Wait for CI* so a commit whose GitHub Actions CI
+   failed is not deployed (`docs/CI_CD.md`).
+3. **Deploy** = push (merge) to `main`. Railway builds `backend/Dockerfile` and
    `railway.json` runs the pre-deploy step before the new container receives traffic — the
    only place migrations run:
    `python -m scripts.predeploy` = `check_env` → `alembic upgrade head` →
@@ -122,14 +122,15 @@ project CA). Source: Supabase "Connect to your database" guide (checked Sept 202
    uv run python -m scripts.grant_membership --tenant bluepeak-retail   --subject <user-uuid> --role member
    ```
 
-5. **Vercel project** from this repo: root directory `frontend`; Node.js 22.x or 24.x (from
-   `engines`; Node 20 is unsupported); set the four `NEXT_PUBLIC_*` variables in its
-   **Production** environment. `frontend/vercel.json` stops the Git integration from
-   deploying `main`; production deploys come from the gated `deploy-frontend` job. Add the
-   Vercel origin to Railway's `CORS_ORIGINS`.
-6. **GitHub:** create the `production` environment (required reviewers, `main` only), its
-   secrets/variables and the two repository enable switches — names in `docs/CI_CD.md`.
-7. **Smoke checks** (below; `deploy-backend` also polls `/health/ready`).
+5. **Vercel project** from this repo (native Git integration): root directory `frontend`,
+   production branch `main`, Node.js 22.x or 24.x (from `engines`; Node 20 is unsupported);
+   set the four `NEXT_PUBLIC_*` variables in its **Production** environment. Every push to
+   `main` deploys to production. Recommended: add the GitHub checks `backend`, `frontend`,
+   `e2e`, `security` as *Deployment Checks* so a red commit is not promoted. Add the Vercel
+   origin to Railway's `CORS_ORIGINS`.
+6. **GitHub:** protect `main` (required checks `backend`, `frontend`, `e2e`, `security`; see
+   `docs/CI_CD.md`). No GitHub secrets are needed.
+7. **Smoke checks** (below).
 
 ## Smoke checks
 
