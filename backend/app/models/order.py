@@ -43,7 +43,11 @@ class Order(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint(check_in("status", OrderStatus), name="status_valid"),
         CheckConstraint("total_amount >= 0", name="total_amount_non_negative"),
         CheckConstraint(CURRENCY_CHECK, name="currency_iso4217"),
-        CheckConstraint("status = 'draft' OR placed_at IS NOT NULL", name="placed_at_unless_draft"),
+        # A draft has never been placed; cancelling a draft (Step 10) keeps placed_at NULL.
+        CheckConstraint(
+            "status IN ('draft', 'cancelled') OR placed_at IS NOT NULL",
+            name="placed_at_unless_draft",
+        ),
         # Customer order history / latest order; also covers the composite FK.
         Index("ix_orders_tenant_id_customer_id_placed_at", "tenant_id", "customer_id", "placed_at"),
         Index("ix_orders_tenant_id_status", "tenant_id", "status"),

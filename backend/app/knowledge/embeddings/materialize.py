@@ -21,10 +21,11 @@ from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from app.knowledge.embeddings.errors import EmbeddingStaleConflictError
-from app.knowledge.embeddings.inputs import document_input, input_hash
+from app.knowledge.embeddings.inputs import input_hash
 from app.knowledge.embeddings.profile import EmbeddingProfile
 from app.knowledge.embeddings.provider import (
     EmbeddingProvider,
+    document_text_for,
     embed_document_inputs,
     resolve_profile,
 )
@@ -117,7 +118,7 @@ def materialize_embeddings(
 
     pending: list[_Pending] = []
     for tenant_id, chunk_id, section, content, title in rows:
-        text = document_input(title, section, content)
+        text = document_text_for(provider, title, section, content)
         digest = input_hash(text)
         existing = stored.get(chunk_id)
         if existing is None:

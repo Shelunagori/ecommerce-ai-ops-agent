@@ -9,6 +9,10 @@ MESSAGES = {
     "agent_empty_answer": "The model returned an empty answer.",
     "agent_retrieval_error": "Policy knowledge could not be retrieved.",
     "agent_grounding_error": "The answer could not be grounded in retrieved policy sources.",
+    "agent_action_error": "The action could not be completed; nothing was changed.",
+    "agent_approval_pending": "This conversation is waiting for an approval decision.",
+    "agent_no_pending_approval": "There is no pending approval for this conversation.",
+    "agent_state_unavailable": "The conversation state is temporarily unavailable.",
 }
 
 

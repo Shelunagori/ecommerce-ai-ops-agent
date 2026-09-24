@@ -46,12 +46,40 @@ class Settings(BaseSettings):
 
     # Embeddings (Step 8) - separate from the chat-model settings above. The Ollama server
     # is the same ``ollama_base_url``; the model is a dedicated embedding model.
-    embedding_provider: Literal["ollama"] = "ollama"
+    embedding_provider: Literal["ollama", "gemini"] = "ollama"
     ollama_embedding_model: str = "nomic-embed-text-v2-moe"
+    # Hosted embeddings (Phase 8): Gemini API, key = GEMINI_API_KEY. A separate profile.
+    gemini_embedding_model: str = "gemini-embedding-2"
     embedding_dimensions: int = Field(default=768, ge=1, le=16000)
     embedding_timeout_seconds: float = Field(default=60.0, ge=1, le=300)
     embedding_batch_size: int = Field(default=16, ge=1, le=64)
     embedding_max_retries: int = Field(default=1, ge=0, le=2)  # transient failures only
+
+    # Approval-gated actions (Step 10). Trusted configuration only.
+    action_approval_ttl_seconds: int = Field(default=900, ge=30, le=86_400)
+    action_execution_claim_timeout_seconds: int = Field(default=120, ge=5, le=3600)
+    # Upper bound for one synthetic store credit (Decimal string; never a float).
+    store_credit_max_amount: str = Field(default="100.00", pattern=r"^\d{1,7}(\.\d{1,2})?$")
+
+    # Abuse protection (Phase 12): chat messages per (user, tenant) per minute; 0 disables.
+    agent_rate_limit_per_minute: int = Field(default=20, ge=0, le=1000)
+
+    # Authentication / tenant boundary (Phase 7).
+    #   demo     - X-Tenant-ID header is trusted (LOCAL DEMO ONLY; refused in production)
+    #   supabase - Supabase Auth JWT (JWKS: RS256/ES256) + server-side tenant_memberships
+    auth_mode: Literal["demo", "supabase"] = "demo"
+    supabase_url: str | None = None  # https://<project-ref>.supabase.co
+    supabase_jwt_audience: str = "authenticated"
+    # Legacy shared-secret (HS256) projects only; asymmetric JWKS keys are preferred.
+    supabase_jwt_secret: SecretStr | None = None
+    auth_jwks_cache_seconds: int = Field(default=300, ge=30, le=86_400)
+    demo_user_subject: str = "demo-user"
+
+    # Optional LangSmith tracing (Phase 5). OFF by default; nothing depends on it. When on,
+    # prompts and model outputs are sent to LangSmith - synthetic data only.
+    langsmith_tracing: bool = False
+    langsmith_api_key: SecretStr | None = None
+    langsmith_project: str = "commerceops-ai"
 
     @field_validator("cors_origins", mode="before")
     @classmethod

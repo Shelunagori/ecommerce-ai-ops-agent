@@ -37,7 +37,7 @@ from app.knowledge.embeddings.errors import (
     EmbeddingTimeoutError,
     EmbeddingUnavailableError,
 )
-from app.knowledge.embeddings.inputs import INPUT_VERSION, query_input
+from app.knowledge.embeddings.inputs import INPUT_VERSION, document_input, query_input
 from app.knowledge.embeddings.profile import (
     EmbeddingProfile,
     normalise_digest,
@@ -72,6 +72,25 @@ class EmbeddingProvider(Protocol):
 
     def embed_query(self, text: str) -> list[float]: ...
 
+    # Optional (Phase 8): a provider with its own input format declares ``input_version``
+    # and ``document_text`` / ``query_text``. Absent -> policy-embedding-input-v1 (nomic).
+
+
+def input_version_of(provider: EmbeddingProvider) -> str:
+    return getattr(provider, "input_version", INPUT_VERSION)
+
+
+def document_text_for(provider: EmbeddingProvider, title: str, section: str, content: str) -> str:
+    fmt = getattr(provider, "document_text", None)
+    return (
+        fmt(title, section, content) if fmt is not None else document_input(title, section, content)
+    )
+
+
+def query_text_for(provider: EmbeddingProvider, query: str) -> str:
+    fmt = getattr(provider, "query_text", None)
+    return fmt(query) if fmt is not None else query_input(query)
+
 
 def resolve_profile(provider: EmbeddingProvider) -> EmbeddingProfile:
     """The concrete profile of ``provider`` right now (resolves the model digest)."""
@@ -80,7 +99,7 @@ def resolve_profile(provider: EmbeddingProvider) -> EmbeddingProfile:
         model=provider.model_name,
         model_digest=provider.resolve_model_digest(),
         dimensions=provider.dimensions,
-        input_version=INPUT_VERSION,
+        input_version=input_version_of(provider),
     )
 
 
@@ -93,7 +112,9 @@ def embed_document_inputs(provider: EmbeddingProvider, inputs: Sequence[str]) ->
 
 def embed_query_text(provider: EmbeddingProvider, query: str) -> list[float]:
     """Embed a (cleaned) user query with the versioned query prefix; validated."""
-    return validate_vector(provider.embed_query(query_input(query)), provider.dimensions)
+    return validate_vector(
+        provider.embed_query(query_text_for(provider, query)), provider.dimensions
+    )
 
 
 def classify(exc: BaseException) -> EmbeddingError:
@@ -257,6 +278,10 @@ def get_embedding_provider(settings: Any = None) -> OllamaEmbeddingProvider:
         from app.core.config import get_settings  # noqa: PLC0415
 
         settings = get_settings()
+    if settings.embedding_provider == "gemini":
+        from app.knowledge.embeddings.gemini import GeminiEmbeddingProvider  # noqa: PLC0415
+
+        return GeminiEmbeddingProvider.from_settings(settings)  # type: ignore[return-value]
     if settings.embedding_provider != "ollama":  # pragma: no cover - Literal-guarded
         raise ValueError("unsupported embedding provider")
     return OllamaEmbeddingProvider(

@@ -14,10 +14,12 @@ dependencies = [
     "alembic>=1.13",
     "langchain==1.4.2",
     "langgraph==1.2.12",
-    "pyyaml==6.0.3",  # policy front matter (yaml.safe_load only)
-    "pgvector==0.5.0",  # SQLAlchemy Vector type + cosine_distance (<=>)
+    "pyyaml==6.0.3", # policy front matter (yaml.safe_load only)
+    "pgvector==0.5.0", # SQLAlchemy Vector type + cosine_distance (<=>)
     "langchain-ollama==1.1.0",
     "langchain-google-genai==4.4.0",
+    "langgraph-checkpoint-postgres==3.1.2",  # official durable checkpointer (PostgresSaver)
+    "pyjwt[crypto]==2.15.0",  # Supabase Auth JWT verification (JWKS, RS256/ES256)
 ]
 
 [dependency-groups]

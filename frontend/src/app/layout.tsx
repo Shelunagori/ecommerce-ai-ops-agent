@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "CommerceOps AI",
-  description: "Ecommerce AI Operations Agent",
+  description: "Ecommerce AI operations assistant with approval-gated actions (synthetic data)",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

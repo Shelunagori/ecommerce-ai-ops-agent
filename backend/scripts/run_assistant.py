@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
     # Step-5 output shape is unchanged: the RAG-only fields (always empty here) are omitted.
-    shown = result.model_dump(mode="json", exclude={"retrievals", "citations"})
+    shown = result.model_dump(mode="json", exclude={"retrievals", "citations", "action"})
     print(json.dumps(shown, indent=2, ensure_ascii=False))
     return 0
 

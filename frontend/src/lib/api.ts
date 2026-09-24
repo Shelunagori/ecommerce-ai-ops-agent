@@ -65,3 +65,53 @@ export type DemoSummary = {
 /** Demo tenant context header (NOT authentication; see src/lib/demo.ts). */
 export const getDemoSummary = (tenantId: string) =>
   apiGet<DemoSummary>("/api/demo/summary", { headers: { "X-Tenant-ID": tenantId } });
+
+/** JSON request with a stable error shape ({code, message, status}); never throws. */
+export async function apiRequest<T>(
+  path: string,
+  {
+    method = "GET",
+    body,
+    headers = {},
+    timeoutMs = 90_000,
+  }: { method?: string; body?: unknown; headers?: Record<string, string>; timeoutMs?: number } = {},
+): Promise<{ ok: true; data: T } | { ok: false; error: { code: string; message: string; status: number | null } }> {
+  if (!API_URL) {
+    return { ok: false, error: { code: "api_not_configured", message: "NEXT_PUBLIC_API_URL is not set.", status: null } };
+  }
+  try {
+    const res = await fetch(`${API_URL}${path}`, {
+      method,
+      headers: {
+        Accept: "application/json",
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+        ...headers,
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      cache: "no-store",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const data = (await res.json().catch(() => null)) as
+      | (T & { error?: { code?: string; message?: string } })
+      | null;
+    if (res.ok && data !== null) return { ok: true, data };
+    return {
+      ok: false,
+      error: {
+        code: data?.error?.code ?? `http_${res.status}`,
+        message: data?.error?.message ?? `Request failed (HTTP ${res.status}).`,
+        status: res.status,
+      },
+    };
+  } catch (err) {
+    const timeout = err instanceof Error && err.name === "TimeoutError";
+    return {
+      ok: false,
+      error: {
+        code: timeout ? "timeout" : "unreachable",
+        message: timeout ? "The request timed out." : "The API is unreachable.",
+        status: null,
+      },
+    };
+  }
+}

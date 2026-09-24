@@ -27,6 +27,11 @@ DOMAIN_TABLES = {
     "knowledge_documents",  # Step 7
     "knowledge_chunks",  # Step 7
     "knowledge_chunk_embeddings",  # Step 8
+    "action_requests",  # Step 10 (0004)
+    "store_credit_transactions",  # Step 10 (0004)
+    "agent_runs",  # Step 10 (0005)
+    "audit_events",  # Step 10 (0005)
+    "tenant_memberships",  # Phase 7 (0006)
 }
 
 
@@ -68,7 +73,14 @@ def test_migration_round_trip_and_models_match(db_engine, database_url):
 
 
 KNOWLEDGE_TABLES = {"knowledge_documents", "knowledge_chunks", "knowledge_chunk_embeddings"}
-ECOMMERCE_TABLES = sorted(DOMAIN_TABLES - KNOWLEDGE_TABLES)
+ACTION_TABLES = {
+    "action_requests",
+    "store_credit_transactions",
+    "agent_runs",
+    "audit_events",
+    "tenant_memberships",
+}
+ECOMMERCE_TABLES = sorted(DOMAIN_TABLES - KNOWLEDGE_TABLES - ACTION_TABLES)
 
 
 def _ecommerce_snapshot(engine) -> dict[str, list[tuple]]:
@@ -156,5 +168,39 @@ def test_embedding_migration_round_trip_keeps_the_vector_extension(db_engine, da
                 conn.exec_driver_sql("SELECT count(*) FROM knowledge_chunk_embeddings").scalar()
                 == 0
             )
+    finally:
+        reset_and_seed(db_engine, cfg)
+
+
+def test_action_migration_round_trip(db_engine, database_url):
+    """0004 downgrade drops only the action tables (ledger first); re-upgrade restores
+    them empty with their constraints; commerce and knowledge data are untouched."""
+    cfg = alembic_config(database_url)
+    try:
+        ecommerce = _ecommerce_snapshot(db_engine)
+        command.downgrade(cfg, "0003")
+        tables = _tables(db_engine)
+        assert "action_requests" not in tables and "store_credit_transactions" not in tables
+        assert _ecommerce_snapshot(db_engine) == ecommerce
+        command.upgrade(cfg, "head")
+        with db_engine.connect() as conn:
+            names = set(
+                conn.exec_driver_sql(
+                    "SELECT conname FROM pg_constraint "
+                    "WHERE conrelid = 'store_credit_transactions'::regclass"
+                ).scalars()
+            )
+            indexes = set(
+                conn.exec_driver_sql(
+                    "SELECT indexname FROM pg_indexes WHERE tablename = 'action_requests'"
+                ).scalars()
+            )
+        assert {
+            "uq_store_credit_transactions_tenant_id_idempotency_key",
+            "ck_store_credit_transactions_amount_positive",
+            "fk_store_credit_transactions_tenant_id_customer_id_customers",
+        } <= names
+        assert "uq_action_requests_open_target" in indexes
+        assert _ecommerce_snapshot(db_engine) == ecommerce
     finally:
         reset_and_seed(db_engine, cfg)

@@ -33,6 +33,29 @@ class ShipmentStatus(StrEnum):
     RETURNED = "returned"
 
 
+class ActionType(StrEnum):
+    """Approval-gated business actions (Step 10). Deliberately narrow: no generic writes."""
+
+    CANCEL_ORDER = "cancel_order"
+    ISSUE_STORE_CREDIT = "issue_store_credit"
+
+
+class ActionStatus(StrEnum):
+    PENDING_APPROVAL = "pending_approval"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXECUTING = "executing"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    EXPIRED = "expired"
+
+
+# Order statuses from which cancel_order is allowed (re-checked at execution time).
+CANCELLABLE_ORDER_STATUSES = frozenset(
+    {OrderStatus.DRAFT, OrderStatus.CONFIRMED, OrderStatus.PROCESSING}
+)
+
+
 class DocumentType(StrEnum):
     POLICY = "policy"
 

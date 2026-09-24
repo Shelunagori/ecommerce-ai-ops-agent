@@ -34,6 +34,10 @@ RUN_RESET: dict[str, Any] = {
     "policy_sources": [],
     "policy_retrieval_status": "none",
     "citations": [],
+    # Step 10 (approval-gated actions). Per-run; an interrupted run is RESUMED, not reset.
+    "action_calls": [],
+    "pending_action": None,
+    "action": None,
 }
 
 
@@ -106,6 +110,14 @@ class CommerceGraphState(TypedDict, total=False):
     policy_retrieval_status: str
     # Citations the accepted final answer used (subset of policy_sources, in answer order).
     citations: list[str]
+    # --- Step 10: approval-gated actions (per-run) ---
+    # One summary per proposal attempt (counts toward the capability budget).
+    action_calls: list[dict[str, Any]]
+    # The persisted request awaiting a human decision (ActionView.as_dict()); the graph is
+    # paused in the APPROVAL node while this is set.
+    pending_action: dict[str, Any] | None
+    # Final action outcome of this run (ActionView.as_dict()).
+    action: dict[str, Any] | None
 
 
 def validate_thread_id(thread_id: Any) -> str:

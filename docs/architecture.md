@@ -1,25 +1,31 @@
 # Architecture notes
 
-Current step: **Step 9 — end-to-end RAG in the LangGraph assistant.** The graph assistant
-can now answer policy questions: the model requests `search_policy_knowledge`, a dedicated
-RETRIEVE node runs the Step-8 semantic retriever with the trusted tenant and the requested
-effective date, and the final answer must cite only chunks retrieved during the current
-user turn (checked deterministically). The Step-5 manual loop is unchanged (prompt v1, no
-policy capability). No hybrid ranking, rerankers, ANN index, write actions, human approval,
-durable persistence or long-term memory yet.
+Current state: **locally complete (Phases 1–13 of the completion spec), not deployed.** The
+LangGraph agent answers commerce questions from tenant-scoped tools, policy questions with
+validated citations, and proposes two narrow write actions that execute only after a human
+approver's decision. Conversations are durable (PostgreSQL checkpoints); identity is a
+verified Supabase JWT plus server-side tenant memberships; a Next.js UI drives it all. The
+sections below are in build order: Steps 1–9 (foundation, tools, LLM layer, graph, RAG),
+then [Actions, approvals and the production path](#actions-approvals-and-the-production-path-phases-112).
 
 | Concern | Where it lives |
 | --- | --- |
 | Structured business data | PostgreSQL (7 tables, Alembic migration `0001`) |
 | Access to that data | `app/services` tenant-scoped query classes (read-only) |
-| Agent-facing capabilities | `app/agent/tools` — 12 typed, read-only LangChain tools, bound to the model by the assistant |
-| Tool-calling loop | `app/agent/assistant` — explicit, bounded, sequential (Step-5 reference / parity oracle) |
-| Graph orchestration | `app/agent/graph` — LangGraph `StateGraph` (model / tools / retrieve nodes), same limits, extended result contract |
-| Policy RAG in the graph | `app/agent/rag` — `search_policy_knowledge` capability, model-facing context, grounding validator, RAG evaluation |
+| Agent-facing capabilities | `app/agent/tools` — 12 typed, read-only LangChain tools |
+| Tool-calling loop | `app/agent/assistant` — explicit, bounded (Step-5 reference / parity oracle) |
+| Graph orchestration | `app/agent/graph` — LangGraph `StateGraph` (model / tools / retrieve / propose / approval / execute) |
+| Policy RAG in the graph | `app/agent/rag` — `search_policy_knowledge`, grounding validator, RAG evaluation |
 | Language models | `app/agent/llm` — provider-neutral layer over Ollama (local) and Gemini (hosted) |
-| Policy knowledge | `app/knowledge` + `knowledge_documents` / `knowledge_chunks` (migration `0002`) — lexical retrieval |
-| Policy embeddings | `app/knowledge/embeddings` + `knowledge_chunk_embeddings` (migration `0003`, pgvector) — exact cosine retrieval |
-| Hybrid ranking / rerankers / ANN | Not implemented yet |
+| Policy knowledge | `app/knowledge` + `knowledge_documents` / `knowledge_chunks` (`0002`) |
+| Policy embeddings | `app/knowledge/embeddings` (Ollama or Gemini) + `knowledge_chunk_embeddings` (`0003`, pgvector) |
+| Write actions | `app/actions` + `action_requests` / `store_credit_transactions` (`0004`) |
+| Audit / run records | `app/observability` + `audit_events` / `agent_runs` (`0005`) |
+| Identity / tenancy | `app/auth` (Supabase JWT) + `tenant_memberships` (`0006`) |
+| Durable graph state | `langgraph-checkpoint-postgres` tables (`scripts/setup_checkpoints.py`) |
+| HTTP API | `app/api/routes/agent.py` (chat, history, approvals, `/api/me`), `app/api/routes/commerce.py` |
+| Frontend | `frontend/src/components/agent` (chat, citations, approval cards) |
+| Hybrid ranking / rerankers / ANN / streaming | Not implemented |
 
 ## Backend layout (`backend/`)
 
@@ -164,6 +170,9 @@ stale, approximate or cross-tenant text. RAG (a later step) is reserved for unst
 knowledge such as company policies; agent tools will call `app/services` for facts.
 
 ## Tenant context (demo) — NOT authentication
+
+> Superseded for hosted use by the trusted identity boundary (Phase 7, below). The header
+> mechanism remains for `AUTH_MODE=demo` locally and is refused when `APP_ENV=production`.
 
 - `X-Tenant-ID: <uuid>` is read by exactly one dependency, `get_tenant_context`
   (`app/api/deps.py`). Missing/blank → `400 tenant_context_missing`; not a UUID →
@@ -994,8 +1003,102 @@ structured outcomes). Generative behaviour drifts, so it is not a CI regression 
 The Step-7/8 retrieval baselines, cases, chunking and embedding representation are
 unchanged (byte-identity test).
 
-**Not implemented:** hybrid ranking, rerankers, ANN indexes, write actions, human approval,
+**Not implemented as of Step 9** (actions, approval, durable checkpoints and chat UI came later; see below): hybrid ranking, rerankers, ANN indexes, write actions, human approval,
 durable checkpoints, long-term memory, frontend chat, web search.
+
+## Actions, approvals and the production path (Phases 1–12)
+
+### Approval-gated write actions
+
+Only two narrow actions exist: `cancel_order` (draft / confirmed / processing only) and
+`issue_store_credit` on a **synthetic** ledger. The model sees two schema-only proposal tools
+(`propose_cancel_order`, `propose_store_credit`); it never supplies tenant, idempotency key,
+status or float amounts.
+
+```mermaid
+sequenceDiagram
+  participant U as User (browser)
+  participant API as FastAPI
+  participant G as LangGraph
+  participant S as ActionService
+  participant DB as PostgreSQL
+  U->>API: POST /api/agent/messages "cancel ORD-1004"
+  API->>G: run (trusted tenant + user thread)
+  G->>G: MODEL -> propose_cancel_order
+  G->>S: propose (validate, canonical args, hash)
+  S->>DB: action_requests(pending_approval) + audit action_requested
+  G-->>API: interrupt (APPROVAL node, checkpointed)
+  API-->>U: approval card (arguments, hash, expiry)
+  U->>API: POST /api/agent/actions/{id}/approve {arguments_hash}
+  API->>S: decide (approver role, tenant-scoped, hash match, not expired)
+  API->>G: resume (Command) -> EXECUTE
+  G->>S: execute: tx1 claim approved->executing
+  S->>DB: tx2 FOR UPDATE re-check, write + succeeded (atomic) + audit
+  G-->>API: templated outcome message
+  API-->>U: status Succeeded
+```
+
+* **Lifecycle:** `pending_approval → approved | rejected | expired`;
+  `approved → executing → succeeded | failed`. A partial unique index allows one open
+  request per (tenant, action, target).
+* **Integrity:** arguments are canonicalised (Decimal strings) and hashed with the sorted
+  evidence citations; approval must present that hash. The idempotency key is derived from
+  (tenant, thread, tool call). Execution is two transactions: a claim, then the business write
+  and `succeeded` together. A stale claim becomes `failed/execution_interrupted` and is never
+  re-executed; a repeated approve returns the original result.
+* **Evidence:** store credit requires policy citations retrieved in the same turn (checked
+  with the grounding validator); rules (customer ↔ order, currency, ≤ order total, ≤
+  `STORE_CREDIT_MAX_AMOUNT`) are re-checked at execution under row locks.
+* **Graph:** PROPOSE persists the request; APPROVAL is a pure `interrupt()` node; EXECUTE runs
+  after `Command(resume=…)`. Refusals go back to the model as a ToolMessage. The final message
+  is templated by the application from the database truth.
+
+### Durable checkpoints
+
+`PostgresSaver` (`langgraph-checkpoint-postgres`) on a psycopg pool (autocommit,
+`prepare_threshold=0`, `dict_row`), strict JSON+msgpack serialisation (no pickle fallback).
+Thread keys are `cg1-sha256(tenant:user-thread)`; the API namespaces threads per user
+(`u<sha256(sub)[:12]>-<thread_id>`). Pending approvals survive restarts and are resumable by
+any instance. Store failures map to `agent_state_unavailable`.
+
+### Evaluation, failure injection, observability
+
+* `app/agent/action_eval.py` + `data/eval/agent_action_cases.yaml` (18 cases, 12 metrics),
+  run against the real database; the oracle script scores 1.00 (harness validation, not a
+  live-model measurement).
+* Failure injection covers model timeouts/malformed output, retriever and DB failures,
+  duplicate call ids, checkpoint read/write errors, post-approval DB failures, expiry and
+  repeated resume.
+* `audit_events` (action lifecycle, same transaction as the change) and `agent_runs`
+  (best effort). LangSmith is optional and off by default. See `OBSERVABILITY.md`.
+
+### Trusted identity and API
+
+* `AUTH_MODE=supabase`: bearer JWT verified against the project JWKS (RS256/ES256, issuer,
+  audience, `role=authenticated`); `tenant_memberships` decides which tenants a subject may
+  select and whether it may approve. `AUTH_MODE=demo` only locally.
+* Endpoints: `GET /api/me`, `POST /api/agent/messages`, `GET /api/agent/threads/{id}/messages`
+  (sanitised), `GET /api/agent/actions[/{id}]`, `POST /api/agent/actions/{id}/approve|reject`.
+  No streaming **(V)**: runs pause for approvals and end with deterministic messages.
+
+### Hosted inference
+
+`GeminiEmbeddingProvider` (`gemini-embedding-2`, documented retrieval prefixes, one
+`Content` per text, inputs over 16 000 chars refused) is a separate embedding profile; vectors
+of different providers/models/revisions never mix.
+
+### Frontend
+
+Chat panel with history restore, numbered citation links and expandable source cards,
+activity summary, approval cards (approve/reject disabled for members), tenant selector
+limited to memberships, Supabase sign-in or demo banner. Security headers incl. CSP.
+
+### Deployment readiness and security
+
+Production refuses unsafe configuration at startup; `/health/ready` checks config, database,
+migrations and checkpoints; `scripts/predeploy.py` runs check → migrate → checkpoints;
+Railway config-as-code. Chat is rate limited per user and tenant; API responses carry
+security headers; no public API docs in production. See `DEPLOYMENT.md` and `SECURITY.md`.
 
 ## Open items
 

@@ -1,0 +1,75 @@
+"""The production agent runtime behind the API (Phase 6).
+
+One per application process, built lazily on first use (no network or DB at import/startup):
+
+* chat model from settings (``get_llm_provider``; hosted in production),
+* ``AGENT_PROFILE`` graph (prompt v3, commerce tools, policy RAG, approval-gated actions),
+* DURABLE PostgreSQL checkpoints (``PostgresSaver``) so approvals survive restarts and can be
+  resumed by any API instance,
+* ``ActionService`` on read-write units of work, durable run records (``RunRecorder``).
+
+Tests replace ``app.state.agent_runtime`` with an in-memory runtime (scripted model).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import threading
+from dataclasses import dataclass
+from typing import Any
+
+from app.actions.service import ActionService
+from app.agent.graph import CommerceGraphAssistant
+from app.agent.graph.profile import AGENT_PROFILE
+
+
+@dataclass
+class AgentRuntime:
+    assistant: CommerceGraphAssistant
+    actions: ActionService
+    closer: Any = None
+
+    def close(self) -> None:
+        if self.closer is not None:
+            self.closer()
+
+
+_lock = threading.Lock()
+
+
+def build_agent_runtime(settings: Any) -> AgentRuntime:
+    from app.agent.graph.checkpoint import durable_checkpointer  # noqa: PLC0415
+    from app.agent.llm import get_llm_provider  # noqa: PLC0415
+    from app.observability.runs import RunRecorder  # noqa: PLC0415
+
+    if not settings.database_url:
+        raise RuntimeError("DATABASE_URL is required for the agent runtime")
+    checkpointer = durable_checkpointer(settings.database_url)
+    actions = ActionService()
+    assistant = CommerceGraphAssistant(
+        get_llm_provider(settings),
+        checkpointer=checkpointer.saver,
+        profile=AGENT_PROFILE,
+        actions=actions,
+        run_recorder=RunRecorder(),
+    )
+    return AgentRuntime(assistant, actions, closer=checkpointer.close)
+
+
+def runtime_for(app: Any) -> AgentRuntime:
+    runtime = getattr(app.state, "agent_runtime", None)
+    if runtime is None:
+        with _lock:
+            runtime = getattr(app.state, "agent_runtime", None)
+            if runtime is None:
+                runtime = build_agent_runtime(app.state.settings)
+                app.state.agent_runtime = runtime
+    return runtime
+
+
+def internal_thread_id(subject: str, thread_id: str) -> str:
+    """Per-USER thread namespace inside the tenant: two users of one tenant never share a
+    thread, even with the same client thread id. (The tenant is added by the runner's
+    ``cg1-sha256(tenant:thread)`` key.)"""
+    tag = hashlib.sha256(subject.encode("utf-8")).hexdigest()[:12]
+    return f"u{tag}-{thread_id}"

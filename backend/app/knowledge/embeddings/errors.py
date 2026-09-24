@@ -73,3 +73,8 @@ class EmbeddingProfileNotMaterializedError(EmbeddingError):
         "No policy embeddings exist for the current embedding profile. "
         "Run: uv run python -m scripts.embed_policies"
     )
+
+
+class EmbeddingNotConfiguredError(EmbeddingError):
+    code = "embedding_not_configured"
+    message = "The hosted embedding provider is not configured (missing API key)."

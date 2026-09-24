@@ -39,6 +39,16 @@ def extract_citations(text: str) -> list[str]:
     return list(seen)
 
 
+def check_citations(
+    citations: list[str], *, current: Mapping[str, object], earlier: Collection[str]
+) -> str | None:
+    """Rule 2 alone (used for action evidence): None, or the failure detail."""
+    for citation in citations:
+        if citation not in current:
+            return "stale_citation" if citation in earlier else "citation_not_retrieved"
+    return None
+
+
 @dataclass(frozen=True)
 class GroundingOutcome:
     ok: bool

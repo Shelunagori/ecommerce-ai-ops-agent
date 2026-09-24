@@ -83,6 +83,40 @@ class PolicyCitation(BaseModel):
     effective_to: date | None
 
 
+class ActionSummary(BaseModel):
+    """Approval-gated action of this run (Step 10). Safe metadata only."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    action_type: Literal["cancel_order", "issue_store_credit"]
+    status: Literal[
+        "pending_approval", "approved", "rejected", "executing", "succeeded", "failed", "expired"
+    ]
+    summary: str
+    arguments: dict[str, str | None]
+    arguments_hash: str  # the approval must be bound to this hash
+    evidence: list[str] = []  # policy citations shown with the request
+    expires_at: str
+    result: dict[str, str | None] | None = None
+    failure_code: str | None = None
+
+    @classmethod
+    def from_view(cls, view: dict) -> "ActionSummary":
+        return cls(
+            id=view["id"],
+            action_type=view["action_type"],
+            status=view["status"],
+            summary=view["summary"],
+            arguments=view["arguments"],
+            arguments_hash=view["arguments_hash"],
+            evidence=[e["citation"] for e in view.get("evidence", [])],
+            expires_at=view["expires_at"],
+            result=view.get("result"),
+            failure_code=view.get("failure_code"),
+        )
+
+
 class AssistantResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -96,3 +130,5 @@ class AssistantResult(BaseModel):
     # Step 9 (LangGraph RAG path). Default-empty: Step-5 callers are unaffected.
     retrievals: list[RetrievalSummary] = []
     citations: list[PolicyCitation] = []
+    # Step 10: the approval-gated action of this run, if any (pending while awaiting approval).
+    action: ActionSummary | None = None

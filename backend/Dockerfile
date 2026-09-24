@@ -27,6 +27,11 @@ COPY --from=builder /app/.venv /app/.venv
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
+# Operational entry points used by the pre-deploy step and the runbook (docs/DEPLOYMENT.md):
+# check_env, setup_checkpoints, seed_demo, ingest/embed policies, grant_membership.
+COPY scripts ./scripts
+# Synthetic policy sources for ingestion (no customer data exists in this project).
+COPY data/policies ./data/policies
 
 USER app
 EXPOSE 8000

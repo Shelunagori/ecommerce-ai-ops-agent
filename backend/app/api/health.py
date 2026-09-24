@@ -2,9 +2,10 @@ import logging
 from collections.abc import Callable
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import JSONResponse
 
+from app.db.readiness import readiness_checks
 from app.db.session import DatabaseNotConfiguredError, ping_database
 from app.schemas.health import DatabaseHealthResponse, HealthResponse
 
@@ -20,6 +21,11 @@ DbCheck = Callable[[], None]
 def get_db_check() -> DbCheck:
     """Dependency returning the DB check; overridden in tests."""
     return ping_database
+
+
+def get_readiness_check() -> Callable[..., dict[str, str]]:
+    """Dependency returning the readiness probe; overridden in tests."""
+    return readiness_checks
 
 
 @router.get("", response_model=HealthResponse)
@@ -53,3 +59,18 @@ def health_db(
 def _unavailable(database: Literal["unreachable", "not_configured"]) -> JSONResponse:
     body = DatabaseHealthResponse(status="error", database=database)
     return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=body.model_dump())
+
+
+@router.get("/ready", responses={503: {"description": "not ready"}})
+def health_ready(
+    request: Request,
+    check: Annotated[Callable[..., dict[str, str]], Depends(get_readiness_check)],
+) -> JSONResponse:
+    """Readiness for load balancers / Railway: config, database, migrations, checkpoints.
+    Codes only; never hostnames, versions or error text."""
+    checks = check(request.app.state.settings)
+    ready = all(v == "ok" for v in checks.values())
+    return JSONResponse(
+        status_code=status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"status": "ready" if ready else "not_ready", "checks": checks},
+    )

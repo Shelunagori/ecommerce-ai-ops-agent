@@ -1,46 +1,69 @@
-"""Request-scoped dependencies for the read-only demo API."""
+"""Request-scoped dependencies: settings, identity/tenant boundary, sessions, queries."""
 
-import uuid
 from typing import Annotated
 
-from fastapi import Depends, Header
+from fastapi import Depends, Header, Request
 from sqlalchemy.orm import Session
 
-from app.core.errors import TenantContextInvalidError, TenantContextMissingError
+from app.auth.jwt import JwtVerifier
+from app.auth.principal import Principal, resolve_principal
+from app.core.config import Settings, get_settings
 from app.core.tenant import TenantContext
 from app.db.session import get_read_session
 from app.services import CommerceQueries
 from app.services.base import Clock, utc_now
-from app.services.tenants import resolve_tenant_context
 
 ReadSession = Annotated[Session, Depends(get_read_session)]
 
-
-def get_tenant_context(
-    session: ReadSession,
-    x_tenant_id: Annotated[
-        str | None,
-        Header(
-            alias="X-Tenant-ID",
-            description=(
-                "Demo tenant selector. NOT authentication: any caller can send any value. "
-                "Will be replaced by authenticated tenant context."
-            ),
+TenantHeader = Annotated[
+    str | None,
+    Header(
+        alias="X-Tenant-ID",
+        description=(
+            "Tenant selector. demo mode: trusted as-is (LOCAL DEMO ONLY). supabase mode: must "
+            "be one of the authenticated user's tenant memberships."
         ),
-    ] = None,
-) -> TenantContext:
-    """TEMPORARY demo mechanism: the tenant comes from a client-supplied header.
+    ),
+]
+AuthorizationHeader = Annotated[str | None, Header(alias="Authorization")]
 
-    This is the only place that decides *how* a request's tenant is established.
-    Replacing it with authenticated identity later does not affect the services.
-    """
-    if x_tenant_id is None or not x_tenant_id.strip():
-        raise TenantContextMissingError()
-    try:
-        tenant_id = uuid.UUID(x_tenant_id.strip())
-    except ValueError:
-        raise TenantContextInvalidError() from None
-    return resolve_tenant_context(session, tenant_id)
+
+def get_app_settings(request: Request) -> Settings:
+    return getattr(request.app.state, "settings", None) or get_settings()
+
+
+def get_jwt_verifier(request: Request) -> JwtVerifier | None:
+    settings = get_app_settings(request)
+    if settings.auth_mode != "supabase":
+        return None
+    verifier = getattr(request.app.state, "jwt_verifier", None)
+    if verifier is None:
+        verifier = JwtVerifier.from_settings(settings)  # no network until first verify
+        request.app.state.jwt_verifier = verifier
+    return verifier
+
+
+def get_principal(
+    request: Request,
+    session: ReadSession,
+    x_tenant_id: TenantHeader = None,
+    authorization: AuthorizationHeader = None,
+) -> Principal:
+    """The ONLY place a request's identity and tenant are established (app.auth.principal)."""
+    return resolve_principal(
+        session,
+        get_app_settings(request),
+        authorization=authorization,
+        x_tenant_id=x_tenant_id,
+        verifier=get_jwt_verifier(request),
+    )
+
+
+CurrentPrincipal = Annotated[Principal, Depends(get_principal)]
+
+
+def get_tenant_context(principal: CurrentPrincipal) -> TenantContext:
+    return principal.tenant
 
 
 def get_clock() -> Clock:

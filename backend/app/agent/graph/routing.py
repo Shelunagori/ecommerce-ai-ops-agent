@@ -25,11 +25,15 @@ from app.agent.graph.state import CommerceGraphState
 MODEL = "model"
 TOOLS = "tools"
 RETRIEVE = "retrieve"
+PROPOSE = "propose_action"
+APPROVAL = "await_approval"
+EXECUTE = "execute_action"
+MAX_ACTION_PROPOSALS_PER_RUN = 2
 
 
 @dataclass(frozen=True)
 class TurnDecision:
-    kind: Literal["tools", "retrieve", "answer", "error"]
+    kind: Literal["tools", "retrieve", "action", "answer", "error"]
     answer: str | None = None
     error_code: str | None = None
     error_detail: str | None = None
@@ -46,11 +50,14 @@ def evaluate_model_turn(
     limits: AssistantLimits,
     retrieval_name: str | None = None,
     retrieval_done: bool = False,
+    action_names: frozenset[str] = frozenset(),
+    action_attempts: int = 0,
 ) -> TurnDecision:
     """``tool_calls_so_far`` counts EVERY capability call of the run (commerce + policy
     retrieval, including invalid attempts). ``retrieval_name`` is the policy capability's
     name when it is enabled (None: Step-5 parity profile, every call is a commerce call).
-    ``retrieval_done``: policy content was already returned to the model in this run."""
+    ``retrieval_done``: policy content was already returned to the model in this run.
+    ``action_names``: approval-gated proposal capabilities (Step 10; empty when disabled)."""
     # 1. Provider could not parse a tool request: execute nothing, fabricate nothing.
     if ai.invalid_tool_calls:
         return TurnDecision(
@@ -88,16 +95,29 @@ def evaluate_model_turn(
             seen.add(call_id)
             new_ids.append(call_id)
         retrievals = [c for c in calls if retrieval_name and c.get("name") == retrieval_name]
-        kind: Literal["tools", "retrieve"] = "retrieve" if retrievals else "tools"
+        kind: Literal["tools", "retrieve", "action"] = "retrieve" if retrievals else "tools"
         if retrievals and len(retrievals) != len(calls):
             # One AIMessage may not mix capability classes: execute nothing of it.
             return _protocol("mixed_capability_batch")
-        if kind == "tools" and retrieval_done:
+        if (
+            kind == "tools"
+            and retrieval_done
+            and not any(c.get("name") in action_names for c in calls)
+        ):
             # Deterministic boundary: once retrieved (untrusted) policy text is in the model's
             # context, no new commerce capability may run in this user turn.
             return _protocol("commerce_call_after_retrieval")
         if len(retrievals) > 1:
             return _limit("max_retrievals_per_turn")
+        actions = [c for c in calls if c.get("name") in action_names]
+        if actions:
+            if len(actions) != len(calls):
+                return _protocol("mixed_capability_batch")
+            if len(actions) > 1:
+                return _limit("max_actions_per_turn")
+            if action_attempts >= MAX_ACTION_PROPOSALS_PER_RUN:
+                return _limit("max_action_proposals")
+            kind = "action"  # type: ignore[assignment]
         # Whole-batch budgets, checked before anything in the batch executes.
         if len(calls) > limits.max_tool_calls_per_turn:
             return _limit("max_tool_calls_per_turn")
@@ -137,7 +157,10 @@ def route_after_model(state: CommerceGraphState) -> str:
     """Approved commerce batch -> TOOLS; approved policy retrieval -> RETRIEVE;
     final answer or terminal error -> END."""
     if state.get("error") is None and state.get("pending") is not None:
-        return RETRIEVE if state.get("pending_kind") == "retrieval" else TOOLS
+        kind = state.get("pending_kind")
+        if kind == "action":
+            return PROPOSE
+        return RETRIEVE if kind == "retrieval" else TOOLS
     return END
 
 
@@ -150,3 +173,11 @@ def route_after_retrieve(state: CommerceGraphState) -> str:
     """Retrieval ToolMessage appended -> MODEL; retrieval infrastructure failure -> END
     (the model is never asked to answer after a failed retrieval)."""
     return END if state.get("error") is not None else MODEL
+
+
+def route_after_propose(state: CommerceGraphState) -> str:
+    """Request persisted -> APPROVAL (pause); invalid proposal -> MODEL (it may explain or
+    correct); infrastructure failure -> END."""
+    if state.get("error") is not None:
+        return END
+    return APPROVAL if state.get("pending_action") is not None else MODEL

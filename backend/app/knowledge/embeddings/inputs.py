@@ -32,6 +32,20 @@ def query_input(query: str) -> str:
     return f"{QUERY_PREFIX}{query}"
 
 
+# Hosted Gemini (Phase 8): Google's documented retrieval formats for gemini-embedding-2
+# (task prefixes instead of the task_type parameter). A different format => a different
+# input version => a different embedding profile (never mixed with the Ollama rows).
+GEMINI_INPUT_VERSION = "policy-embedding-input-gemini-v1"
+
+
+def gemini_document_input(title: str, section: str, content: str) -> str:
+    return f"title: {title} | text: Section: {section}\n\n{content}"
+
+
+def gemini_query_input(query: str) -> str:
+    return f"task: search result | query: {query}"
+
+
 def clean_query(query: str) -> str:
     """Untrusted query text: must be a string; trimmed and capped at 500 chars."""
     if not isinstance(query, str):

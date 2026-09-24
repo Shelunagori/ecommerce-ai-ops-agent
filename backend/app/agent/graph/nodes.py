@@ -7,17 +7,23 @@ RETRIEVE (Step 9) runs the policy retriever with the trusted tenant context and 
 limit. Policy retrieval never goes through ``ToolExecutor``.
 """
 
+import json
 import logging
 import time
+import uuid
 from collections.abc import Callable
 from datetime import date
 from typing import Any, Protocol
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.runtime import Runtime
+from langgraph.types import interrupt
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.actions import errors as action_errors
+from app.actions.capability import ACTION_TOOLS, action_tools, parse_action_call
 from app.agent.assistant.executor import ToolExecutionError, ToolExecutor
 from app.agent.assistant.limits import AssistantLimits
 from app.agent.assistant.result import RetrievalSummary
@@ -34,7 +40,7 @@ from app.agent.rag.capability import (
     policy_search_tool,
 )
 from app.agent.rag.context import format_policy_results, invalid_arguments_text
-from app.agent.rag.grounding import check_grounding
+from app.agent.rag.grounding import check_citations, check_grounding
 from app.knowledge.embeddings.errors import EmbeddingError
 from app.knowledge.retrieval import RetrievalResult
 
@@ -42,6 +48,7 @@ logger = logging.getLogger("app.agent.graph")
 
 THREAD_SCOPE_MESSAGE = "This conversation thread belongs to a different account."
 ARTIFACT_KEY = "policy_citations"  # ToolMessage.artifact: kept in history, never sent to models
+ACTION_NAMES = frozenset(ACTION_TOOLS)
 _STATUS_RANK = {"none": 0, "invalid": 1, "no_results": 2, "success": 3}
 
 
@@ -91,14 +98,18 @@ class GraphNodes:
         limits: AssistantLimits,
         profile: GraphProfile,
         retriever: Callable[[], PolicyRetriever] | None = None,
+        actions: Callable[[], Any] | None = None,
     ) -> None:
         self._provider = provider
         self._executor = executor
         self._limits = limits
         self._profile = profile
         self._retriever = retriever
-        self._bound: tuple[BaseTool, ...] = executor.tools + (
-            (policy_search_tool(),) if profile.policy_knowledge else ()
+        self._actions = actions  # zero-arg factory -> ActionService (Step 10)
+        self._bound: tuple[BaseTool, ...] = (
+            executor.tools
+            + ((policy_search_tool(),) if profile.policy_knowledge else ())
+            + (action_tools() if profile.actions else ())
         )
 
     @property
@@ -139,14 +150,18 @@ class GraphNodes:
             round_no=round_no,
             seen_call_ids=state.get("seen_tool_call_ids", []),
             # every capability call counts: commerce + policy retrieval (incl. invalid ones)
-            tool_calls_so_far=len(state.get("tool_calls", [])) + len(state.get("retrievals", [])),
+            tool_calls_so_far=len(state.get("tool_calls", []))
+            + len(state.get("retrievals", []))
+            + len(state.get("action_calls", [])),
             limits=self._limits,
             retrieval_name=SEARCH_POLICY_KNOWLEDGE if self._profile.policy_knowledge else None,
             retrieval_done=status in ("success", "no_results"),
+            action_names=ACTION_NAMES if self._profile.actions else frozenset(),
+            action_attempts=len(state.get("action_calls", [])),
         )
-        if decision.kind in ("tools", "retrieve"):
+        if decision.kind in ("tools", "retrieve", "action"):
             seen = [*state.get("seen_tool_call_ids", []), *decision.new_call_ids]
-            kind = "retrieval" if decision.kind == "retrieve" else "commerce"
+            kind = {"retrieve": "retrieval", "action": "action"}.get(decision.kind, "commerce")
             return {**update, "pending": ai, "pending_kind": kind, "seen_tool_call_ids": seen}
         if decision.kind == "answer":
             if self._profile.policy_knowledge:
@@ -349,3 +364,206 @@ class GraphNodes:
                 raise _RetrievalCheckError("duplicate_citation")
             seen.add(r.citation)
         return result
+
+
+# --- Step 10: approval-gated actions ------------------------------------------------------------
+def _json_tool_message(
+    call_id: str, name: str, payload: dict[str, Any], *, error: bool
+) -> ToolMessage:
+    return ToolMessage(
+        content=json.dumps(payload, ensure_ascii=False),
+        tool_call_id=call_id,
+        name=name,
+        status="error" if error else "success",
+    )
+
+
+def outcome_text(view: dict[str, Any]) -> str:
+    """Application-written outcome message (never model-written: a write can't be misreported)."""
+    ref = f"(action {view['id']})"
+    status = view["status"]
+    result = view.get("result") or {}
+    if status == "succeeded" and view["action_type"] == "cancel_order":
+        return (
+            f"Done: order {result['order_number']} was cancelled "
+            f"(previous status: {result['previous_status']}) {ref}."
+        )
+    if status == "succeeded":
+        target = f" for order {result['order_number']}" if result.get("order_number") else ""
+        evidence = " ".join(f"[{e['citation']}]" for e in view.get("evidence", []))
+        return (
+            f"Done: store credit of {result['amount']} {result['currency']} was issued to "
+            f"customer {result['customer_code']}{target} {ref}. Policy basis: {evidence}"
+        ).strip()
+    if status == "rejected":
+        return f"The request was rejected; nothing was changed {ref}."
+    if status == "expired":
+        return f"The approval window expired; nothing was changed {ref}."
+    code = view.get("failure_code") or "execution_failed"
+    return f"The action could not be executed ({code}); nothing was changed {ref}."
+
+
+def approval_text(view: dict[str, Any]) -> str:
+    return (
+        "This action needs your approval before anything is changed: "
+        f"{view['summary']} (action {view['id']}, expires {view['expires_at']})."
+    )
+
+
+class ActionNodes:
+    """PROPOSE -> APPROVAL (interrupt) -> EXECUTE. Business writes happen ONLY in EXECUTE,
+    only through ``ActionService.execute``, and only for a request a human approved."""
+
+    def __init__(self, nodes: GraphNodes) -> None:
+        self._n = nodes
+
+    def _service(self) -> Any:
+        if self._n._actions is None:
+            raise RuntimeError("action service not configured")
+        return self._n._actions()
+
+    def propose(
+        self, state: CommerceGraphState, config: RunnableConfig, runtime: Runtime[AgentContext]
+    ) -> dict[str, Any]:
+        context = _trusted_context(runtime)
+        ai = state.get("pending")
+        if ai is None or state.get("pending_kind") != "action" or len(ai.tool_calls) != 1:
+            raise RuntimeError("propose node reached without one approved proposal call")
+        call = ai.tool_calls[0]
+        round_no = state.get("model_calls", 0)
+        attempts = list(state.get("action_calls", []))
+        summary: dict[str, Any] = {"round": round_no, "capability": call.get("name")}
+        try:
+            proposal = parse_action_call(call.get("name", ""), call.get("args"))
+            sources = {s["citation"]: s for s in state.get("policy_sources", [])}
+            problem = check_citations(
+                proposal.citations,
+                current=sources,
+                earlier=earlier_policy_citations(state["messages"]),
+            )
+            if problem is not None:
+                raise action_errors.ActionArgumentsInvalidError(
+                    "policy_citations must come from policy retrieved in this request.",
+                    detail=problem,
+                )
+            provider = self._n._provider.info
+            view = self._service().propose(
+                context.tenant,
+                proposal.action_type,
+                proposal.arguments,
+                evidence=[sources[c] for c in proposal.citations],
+                requested_by={
+                    "runner": "langgraph",
+                    "provider": provider.provider,
+                    "model": provider.model,
+                    "prompt_version": self._n._profile.prompt_version,
+                },
+                thread_key=(config.get("configurable") or {}).get("thread_id"),
+                tool_call_id=call["id"],
+            )
+        except action_errors.ActionError as exc:
+            if exc.status_code >= 500:
+                raise
+            # Invalid / not allowed: nothing persisted; the model may explain or correct.
+            code = exc.detail if exc.code == "action_invalid_arguments" and exc.detail else exc.code
+            attempts.append({**summary, "outcome": "rejected", "error_code": code})
+            message = _json_tool_message(
+                call["id"],
+                call.get("name") or "action",
+                {"ok": False, "error": {"code": code, "message": exc.message}},
+                error=True,
+            )
+            return {
+                "messages": [ai, message],
+                "pending": None,
+                "pending_kind": None,
+                "action_calls": attempts,
+            }
+        except SQLAlchemyError:
+            attempts.append({**summary, "outcome": "error", "error_code": "database_unavailable"})
+            return {
+                "pending": None,
+                "pending_kind": None,
+                "action_calls": attempts,
+                "error": _error("agent_action_error", "database_unavailable"),
+            }
+        attempts.append({**summary, "outcome": "pending_approval", "action_id": str(view.id)})
+        # The proposal AIMessage stays in ``pending`` (checkpointed) until EXECUTE appends it
+        # together with its ToolMessage, so history is never left with an unanswered call.
+        return {"pending_action": view.as_dict(), "action_calls": attempts}
+
+    def await_approval(self, state: CommerceGraphState) -> dict[str, Any]:
+        """Pure: pause for a human. Re-runs on resume (LangGraph semantics), so it must
+        have no side effects. The decision itself is recorded in the DB by the runner."""
+        pending = state.get("pending_action")
+        if pending is None:
+            raise RuntimeError("approval node reached without a pending action")
+        signal = interrupt({"type": "action_approval", "action": pending})
+        if not isinstance(signal, dict) or signal.get("action_request_id") != pending["id"]:
+            return {"error": _error("agent_protocol_error", "approval_mismatch"), "pending": None}
+        return {}
+
+    def execute(self, state: CommerceGraphState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
+        context = _trusted_context(runtime)
+        if state.get("error") is not None:
+            return {}
+        ai = state.get("pending")
+        pending = state.get("pending_action")
+        if ai is None or pending is None:
+            raise RuntimeError("execute node reached without a pending action")
+        service = self._service()
+        action_id = uuid.UUID(pending["id"])
+        try:
+            view = service.get(context.tenant, action_id)
+            if view.status in ("approved", "executing", "succeeded"):
+                try:
+                    view = service.execute(context.tenant, action_id)
+                except action_errors.ActionError:
+                    # failed / expired / precondition changed: report the DB's truth
+                    view = service.get(context.tenant, action_id)
+                if view.status == "executing":  # someone else is executing it right now
+                    return {
+                        "pending": None,
+                        "error": _error("agent_action_error", "action_in_progress"),
+                    }
+            elif view.status == "pending_approval":
+                return {
+                    "pending": None,
+                    "error": _error("agent_protocol_error", "approval_not_decided"),
+                }
+        except action_errors.ActionError as exc:
+            return {"pending": None, "error": _error("agent_action_error", exc.code)}
+        except SQLAlchemyError:
+            return {"pending": None, "error": _error("agent_action_error", "database_unavailable")}
+        final = view.as_dict()
+        call = ai.tool_calls[0]
+        tool_message = _json_tool_message(
+            call["id"],
+            call.get("name") or "action",
+            {
+                "ok": final["status"] == "succeeded",
+                "action": {
+                    "id": final["id"],
+                    "status": final["status"],
+                    "result": final["result"],
+                    "failure_code": final["failure_code"],
+                },
+            },
+            error=final["status"] != "succeeded",
+        )
+        text = outcome_text(final)
+        return {
+            "messages": [
+                ai,
+                tool_message,
+                AIMessage(content=text, id=f"action-outcome-{final['id']}"),
+            ],
+            "pending": None,
+            "pending_kind": None,
+            "pending_action": None,
+            "action": final,
+            "answer": text,
+            "citations": [e["citation"] for e in final.get("evidence", [])]
+            if final["status"] == "succeeded"
+            else [],
+        }

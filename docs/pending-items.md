@@ -5,8 +5,6 @@ Resolved modelling decisions live in [architecture.md](architecture.md), not her
 
 | # | Item | Context | Raised |
 | --- | --- | --- | --- |
-| P1 | Seed guard blocks a hosted demo seed | `scripts/seed_demo.py` refuses `APP_ENV=production`. Seeding a Supabase demo database from an environment configured as production is therefore blocked. | Step 2 |
-| P2 | Explicit production demo-seed mechanism for Supabase | Decide how the public demo gets synthetic data (e.g. a deliberate, explicitly-flagged one-off command against the Supabase URL) without weakening the production guard in general. | Step 2 |
 | P3 | Uvicorn logging consistency | Application logs are JSON lines; uvicorn's own startup/access logs are still plain text. Align them (or disable uvicorn's access log in favour of the app's request log). | Step 1 |
 | P4 | Supabase transaction-pooler prepared statements | Supabase's transaction pooler (port 6543) needs psycopg prepared statements disabled (`prepare_threshold=None`). Today the docs recommend the direct / session-pooler connection instead. | Step 1 |
 | P6 | Unbounded thread history in checkpoints | A continued LangGraph thread appends every message to its checkpoint and sends the full history to the model; nothing trims, summarises or caps it. Decide pruning/summarisation (and a size limit) together with durable persistence and conversation memory. | Step 6 |
@@ -16,3 +14,19 @@ Resolved modelling decisions live in [architecture.md](architecture.md), not her
 | P10 | No relevance threshold / deterministic abstention for semantic retrieval | Semantic retrieval returns the three nearest eligible chunks even for a question no policy covers; "no results" happens only when no policy version is eligible on the date. Abstention for irrelevant results relies on the v2 prompt and is measured by the RAG evaluation. Decide a calibrated threshold or an abstention check (without brittle phrase matching) together with hybrid retrieval. | Step 9 |
 | P11 | Policy answers without retrieval are not detected | The grounding validator rejects wrong/stale citations and missing citations after a successful retrieval, but a policy-sounding answer produced WITHOUT any retrieval and WITHOUT citations passes (it is indistinguishable from a general answer without classifying the text). Covered today by the prompt and the retrieval-decision metric; decide whether to add an answer/intent classifier. | Step 9 |
 | P12 | RAG evaluation set is small and synthetic | 12 cases with scripted-model CI coverage; the live-model numbers are a single measurement on a local 4B model. Grow the cases (paraphrases, multi-policy answers, adversarial user phrasing) before drawing conclusions about answer quality. | Step 9 |
+| P13 | Live Supabase Auth verification | JWT verification is tested with locally generated RSA/EC keys and a locally served JWKS document; no real Supabase project or user was used. Verify sign-in → token → `/api/me` against a real project before a demo. | Phase 7 |
+| P14 | Live Gemini verification of the full agent | Hosted chat and embeddings are implemented and contract-tested with fakes; the opt-in live tests need `GEMINI_API_KEY`. Tool-calling and approval-proposal quality of the hosted chat model is unmeasured. | Phases 8, 11 |
+| P15 | Live-model action evaluation | The 18-case action evaluation has only been run with the deterministic oracle script (harness validation). A live run needs a disposable database (it performs real synthetic cancellations/credits) and a runner script; add both before claiming model behaviour. | Phase 3 |
+| P16 | Rate limit is per process | `AGENT_RATE_LIMIT_PER_MINUTE` is enforced in memory; several API instances would each allow the full rate. Needs a shared store only if the deployment scales out. | Phase 12 |
+| P17 | No global spend cap for the hosted model | Per-user limits exist, but nothing caps total model calls per day across users. Consider a daily budget (DB counter) for a public demo. | Phase 12 |
+| P18 | CSP allows inline scripts; Supabase session in localStorage | Next.js bootstrap needs `'unsafe-inline'` without nonces; supabase-js stores the session in `localStorage` by default. Consider nonce-based CSP (dynamic rendering) and cookie-based SSR auth. | Phase 12 |
+| P19 | Docker image not built in the sandbox | Docker Hub is blocked in the development sandbox; the image `CMD` was verified as an unprivileged process instead. Run `docker build` + the checks in `DEPLOYMENT.md` on a machine with registry access. | Phase 11 |
+| P20 | Conversation id is not persisted in the browser | A page reload starts a new conversation; pending approvals remain visible via `GET /api/agent/actions`. Decide whether to list/restore past threads. | Phase 9 |
+| P21 | No streaming responses | Answers arrive when the run finishes (loading state shown). Streaming would need to handle approval interrupts mid-stream. | Phase 6 |
+| P22 | Request body size is bounded only by the platform | Message text is limited to 4000 characters after parsing; the raw body size is not limited by the application. Rely on the hosting proxy or add a limit middleware. | Phase 12 |
+
+## Resolved
+
+| # | Item | Resolution |
+| --- | --- | --- |
+| P1 / P2 | Hosted demo seeding vs the production seed guard | Decided **(V)**: the guard stays. The synthetic demo data is bootstrapped once from an operator machine with `APP_ENV=staging` against the hosted database (`DEPLOYMENT.md` step 4); the running production service has no bulk-mutation path. |

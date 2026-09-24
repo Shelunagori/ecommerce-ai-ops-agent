@@ -120,3 +120,46 @@ def api(api_app: FastAPI) -> Iterator[TestClient]:
 @pytest.fixture
 def headers_for() -> Callable[[TenantContext], dict[str, str]]:
     return lambda tenant: {"X-Tenant-ID": str(tenant.tenant_id)}
+
+
+# --- committed writes (Step 10 actions) --------------------------------------------------------
+_ACTION_TABLES = (
+    "audit_events",
+    "agent_runs",
+    "store_credit_transactions",
+    "action_requests",
+    "tenant_memberships",
+)
+_EXTRA_CLEANUP: list[str] = []  # later phases register their tenant-scoped audit tables here
+
+
+@pytest.fixture
+def committed(db_engine: Engine, monkeypatch: pytest.MonkeyPatch):
+    """A REAL committing unit of work on the test DB (needed for locking/concurrency),
+    wired into ``app.db.session``. After the test every action row is deleted and every
+    order status is restored, so later tests see the pristine seed."""
+    from contextlib import contextmanager
+
+    from sqlalchemy import text
+
+    factory = sessionmaker(bind=db_engine, autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(db_session_module, "_session_factory", lambda: factory)
+    with db_engine.connect() as conn:
+        statuses = conn.execute(text("SELECT id, status FROM orders")).all()
+
+    @contextmanager
+    def scope():
+        with factory() as session, session.begin():
+            yield session
+
+    try:
+        yield scope
+    finally:
+        with db_engine.begin() as conn:
+            for table in (*_EXTRA_CLEANUP, *_ACTION_TABLES):
+                conn.execute(text(f"DELETE FROM {table}"))  # noqa: S608 - fixed table names
+            for order_id, status in statuses:
+                conn.execute(
+                    text("UPDATE orders SET status = :s WHERE id = :i"),
+                    {"s": status, "i": order_id},
+                )

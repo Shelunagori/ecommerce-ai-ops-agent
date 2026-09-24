@@ -12,6 +12,7 @@ approval step (action request -> interrupt -> action execution) can be inserted 
 """
 
 from collections.abc import Callable, Sequence
+from typing import Any
 
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
@@ -21,13 +22,17 @@ from langgraph.types import Checkpointer
 from app.agent.assistant.executor import ToolExecutor
 from app.agent.assistant.limits import AssistantLimits
 from app.agent.context import AgentContext
-from app.agent.graph.nodes import GraphNodes, PolicyRetriever
+from app.agent.graph.nodes import ActionNodes, GraphNodes, PolicyRetriever
 from app.agent.graph.profile import RAG_PROFILE, GraphProfile
 from app.agent.graph.routing import (
+    APPROVAL,
+    EXECUTE,
     MODEL,
+    PROPOSE,
     RETRIEVE,
     TOOLS,
     route_after_model,
+    route_after_propose,
     route_after_retrieve,
     route_after_tools,
 )
@@ -52,11 +57,20 @@ def build_commerce_graph(
     checkpointer: Checkpointer = None,
     profile: GraphProfile = RAG_PROFILE,
     retriever: PolicyRetriever | Callable[[], PolicyRetriever] | None = None,
+    actions: Any = None,
 ) -> CompiledStateGraph:
+    """``actions``: ``ActionService`` (or zero-arg factory) for ``AGENT_PROFILE``; default:
+    ``ActionService()`` on read-write units of work, built lazily."""
     executor = ToolExecutor(tools if tools is not None else build_commerce_tools())
     factory = _retriever_factory(retriever) if profile.policy_knowledge else None
+    action_factory = _action_factory(actions) if profile.actions else None
     nodes = GraphNodes(
-        provider, executor, limits or AssistantLimits.from_settings(), profile, factory
+        provider,
+        executor,
+        limits or AssistantLimits.from_settings(),
+        profile,
+        factory,
+        action_factory,
     )
     return _compile(nodes, profile, checkpointer)
 
@@ -68,7 +82,24 @@ def _compile(
     builder.add_node(MODEL, nodes.model)
     builder.add_node(TOOLS, nodes.tools)
     builder.add_edge(START, MODEL)
-    if profile.policy_knowledge:
+    if profile.actions:
+        acts = ActionNodes(nodes)
+        builder.add_node(RETRIEVE, nodes.retrieve)
+        builder.add_node(PROPOSE, acts.propose)
+        builder.add_node(APPROVAL, acts.await_approval)
+        builder.add_node(EXECUTE, acts.execute)
+        builder.add_conditional_edges(
+            MODEL,
+            route_after_model,
+            {TOOLS: TOOLS, RETRIEVE: RETRIEVE, PROPOSE: PROPOSE, END: END},
+        )
+        builder.add_conditional_edges(RETRIEVE, route_after_retrieve, {MODEL: MODEL, END: END})
+        builder.add_conditional_edges(
+            PROPOSE, route_after_propose, {APPROVAL: APPROVAL, MODEL: MODEL, END: END}
+        )
+        builder.add_edge(APPROVAL, EXECUTE)
+        builder.add_edge(EXECUTE, END)
+    elif profile.policy_knowledge:
         builder.add_node(RETRIEVE, nodes.retrieve)
         builder.add_conditional_edges(
             MODEL, route_after_model, {TOOLS: TOOLS, RETRIEVE: RETRIEVE, END: END}
@@ -94,6 +125,23 @@ def _retriever_factory(
     def default() -> PolicyRetriever:
         if not cache:
             cache.append(default_policy_retriever())
+        return cache[0]
+
+    return default
+
+
+def _action_factory(actions: Any) -> Callable[[], Any]:
+    if actions is not None and hasattr(actions, "propose"):
+        return lambda: actions
+    if actions is not None:
+        return actions
+    cache: list[Any] = []
+
+    def default() -> Any:
+        if not cache:
+            from app.actions.service import ActionService  # noqa: PLC0415
+
+            cache.append(ActionService())
         return cache[0]
 
     return default
