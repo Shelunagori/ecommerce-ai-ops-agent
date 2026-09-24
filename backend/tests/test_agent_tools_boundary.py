@@ -119,14 +119,16 @@ def test_tool_names_are_snake_case_and_described(tools):
         assert "sqlalchemy" not in tool.description.lower()
 
 
-def test_application_code_does_not_import_langgraph():
+def test_langgraph_is_imported_only_by_the_graph_package():
+    """Step 6: LangGraph orchestration lives in app/agent/graph/ only; tools, services,
+    the Step-5 loop and the LLM layer stay LangGraph-free."""
     app_dir = Path(__file__).resolve().parents[1] / "app"
-    offenders = [
-        str(p.relative_to(app_dir))
+    importers = {
+        p.relative_to(app_dir).as_posix()
         for p in app_dir.rglob("*.py")
         if re.search(r"^\s*(from|import)\s+langgraph", p.read_text(), re.M)
-    ]
-    assert offenders == []
+    }
+    assert importers and all(p.startswith("agent/graph/") for p in importers), importers
 
 
 # --- model-visible schemas -----------------------------------------------------------------

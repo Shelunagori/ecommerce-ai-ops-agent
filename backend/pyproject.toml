@@ -13,6 +13,7 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "alembic>=1.13",
     "langchain==1.4.2",
+    "langgraph==1.2.12",
     "langchain-ollama==1.1.0",
     "langchain-google-genai==4.4.0",
 ]
