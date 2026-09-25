@@ -92,6 +92,12 @@ project CA). Source: Supabase "Connect to your database" guide (checked Sept 202
 * **No local dependency at start-up.** Construction is network-free (models, embeddings,
   JWKS and the checkpoint pool are created lazily); `/health` answers without a database.
   Ollama is never needed in production (`LLM_PROVIDER`/`EMBEDDING_PROVIDER=gemini` enforced).
+* **Live execution stream.** `POST /api/agent/messages/stream` and
+  `/api/agent/actions/{id}/approve|reject/stream` answer `text/event-stream` with
+  `X-Accel-Buffering: no`, `Cache-Control: no-store` and a comment heartbeat every 15 s, so an
+  idle edge proxy keeps the connection open during a long model call. The browser calls the
+  Railway API directly (not through a Vercel rewrite), so Vercel does not buffer it. Nothing
+  new to configure; verify once on the deployed stack (P26). A disconnect never cancels a run.
 * **Checkpoint retention.** No automatic TTL; completed threads stay until deleted
   (`delete_checkpoint_thread`). Prune deliberately if storage matters (P6).
 
@@ -169,7 +175,15 @@ curl -s -o /dev/null -w '%{http_code}\n' -X OPTIONS -H 'Origin: https://evil.exa
      -H 'Access-Control-Request-Method: POST' $API/api/agent/messages              # no allow-origin header
 ```
 
-Then in the browser: sign in → the tenant selector shows only granted tenants → ask a
+Live trace (no auth needed to see the refusal; with a token you see the events):
+
+```bash
+curl -N -s -X POST $API/api/agent/messages/stream -H 'Content-Type: application/json' \
+     -d '{"text":"hi","thread_id":"smoke"}' -o /dev/null -w '%{http_code}\n'        # 401 before any stream
+```
+
+Then in the browser: sign in → the tenant selector shows only granted tenants → send a
+question and watch the Agent Execution Trace fill in step by step while it runs → ask a
 policy question (cited answer) → "cancel ORD-1004" → approve as the approver user → the
 member user sees approve/reject disabled.
 

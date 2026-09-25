@@ -1114,10 +1114,70 @@ security headers; no public API docs in production. See `DEPLOYMENT.md` and `SEC
   history shows "Execution trace is available for new runs."
 * **UI.** Desktop: collapsible trace panel beside the chat, following the newest (or
   selected) run; mobile/tablet: per-answer "View execution trace" disclosure. Technology
-  badges are derived from event kind + metadata only.
+  badges are derived from event kind + metadata only. Since the live-trace phase the trace is
+  streamed while the run executes (next section).
 * **`/review`.** Public, static engineering case study (architecture diagram, request
   walkthroughs, RAG, HITL, security, evaluation, deployment, decisions); plain React/CSS, no
   new dependency. "Try Live Demo" links to `/?demo=1`, which starts the anonymous session.
+
+## Live execution trace (streaming)
+
+The execution trace is also streamed **while the run executes**, so the UI shows each real
+step turning amber (running) and then green (completed) or red (failed).
+
+```
+Browser ──POST /api/agent/messages/stream (fetch + ReadableStream)──▶ FastAPI
+   ▲        auth, tenant, rate limit, capability profile checked BEFORE streaming
+   │                                     │
+   │   text/event-stream                 ▼  worker thread: the SAME assistant.run(...)
+   │   run_started, step_started,        │  graph nodes emit at real boundaries through a
+   │   step_completed/failed/skipped,    │  RunEmitter (context variable, no FastAPI coupling)
+   │   approval_required/resolved, …     │
+   └── run_completed {normal AgentResponse} | run_failed {code, message, status}
+```
+
+* **Why fetch streaming, not `EventSource`.** A run needs a JSON body, an
+  `Authorization: Bearer` header and the `X-Tenant-ID` selector; `EventSource` only issues a
+  GET without custom headers. The browser parses standard SSE from `fetch()`'s body
+  (`src/lib/sse.ts`: partial chunks, several events per chunk, CRLF, comments, bad JSON).
+* **One execution path.** `POST /api/agent/messages` (unchanged) and the stream call the same
+  `CommerceGraphAssistant.run`; the stream only passes `events=RunEmitter(sink)`. Decisions:
+  `POST /api/agent/actions/{id}/approve|reject/stream` call the same `_decide` → `resume`.
+* **Event schema** (`app/agent/events.py`, strict pydantic, `extra=forbid`): `type`, `run_id`
+  (random, correlation only), `sequence`, `elapsed_ms` (server time since run start),
+  `step_id`, `kind` (the trace kinds), `label`, `status` (`running`, `completed`, `failed`,
+  `rejected`, `waiting`, `skipped`), `detail`, `metadata` (the trace's closed safe set),
+  `duration_ms` (measured), plus `capabilities` (run_started), `next_steps`
+  (approval_required), `response` (run_completed), `error` (run_failed).
+* **Emission points.** Runner: `run_started` (+ the profile's capabilities), request
+  start/end, after the graph returns: approval pause (`approval_required` with the fixed next
+  steps execution → response), checkpoint, response, then `step_skipped` for capabilities that
+  never ran; on failure: open steps → failed, unused → skipped ("Not run"). Nodes: MODEL
+  (before/after the provider call; grounding start/end only where the final trace reports it),
+  TOOLS (per call), RETRIEVE, PROPOSE, EXECUTE (`approval_resolved` from the DB decision, then
+  execution start/end, or skipped when rejected/expired). The approval resolution before a new
+  message (`_settle_pending_approval`) is never reported into that message's stream.
+* **No predicted trajectory.** Gray rows are the capabilities the graph *has* (sent in
+  `run_started`), not a plan; a capability becomes "Not used" only when the backend says so at
+  the end. Finished steps are built by the same builders as the final trace
+  (`app/agent/trace.py`), and tests assert the streamed finished steps equal
+  `execution_trace` (message runs and paused + resumed runs). After `run_completed` the UI
+  converges on the final trace (source of truth), keeping live-measured model-call durations.
+* **Thread safety / isolation.** `RunEmitter` holds one lock; events reach the sink in
+  sequence order; every sink call is exception-proof, so a broken stream can never change a
+  run, a write or its tenant scope. Without an emitter (JSON API, CLI) a no-op emitter is used.
+* **Disconnect behaviour (V).** The run is not tied to the connection: the worker thread
+  always finishes (reads and writes alike), the outcome is durable (checkpoints, action
+  request, audit events) and reloads through history/approval endpoints. Nothing is retried:
+  the UI never resends a streamed request; after a lost stream it offers "Reload conversation".
+  A missing stream route (404/405) — nothing ran — falls back once to the JSON endpoint.
+* **Transport details.** 15 s SSE comment heartbeats; `Cache-Control: no-store`,
+  `X-Accel-Buffering: no`; the browser treats 45 s of silence as an interrupted stream.
+* **UI.** `LiveTrace` (desktop side panel, opens on Send; mobile "View live execution"
+  inline), amber pulse/shimmer for running rows, green check pop, red pulse on failure, gray
+  hollow placeholders and "Not used" dashes; all motion is CSS and disabled for
+  `prefers-reduced-motion`; statuses are also text (`sr-only`) and announced via `role=status`
+  (failures `role=alert`). Auto-follows the active step unless the reader scrolled up.
 
 ## Open items
 

@@ -6,7 +6,7 @@ const PROVIDERS: Record<string, string> = { gemini: "Gemini", ollama: "Ollama" }
  * Technology badges derived ONLY from what the event says actually happened (its kind and
  * safe metadata such as the retriever identity or model provider) — never decoration.
  */
-export function badgesFor(event: ExecutionTraceEvent): string[] {
+export function badgesFor(event: Pick<ExecutionTraceEvent, "kind" | "metadata">): string[] {
   const m = event.metadata;
   switch (event.kind) {
     case "request":

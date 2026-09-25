@@ -199,6 +199,18 @@ def test_member_role_cannot_approve(api, tenant_a):
     assert (r.status_code, r.json()["error"]["code"]) == (403, "action_forbidden")
 
 
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+def test_member_role_cannot_decide_through_the_stream(api, tenant_a, decision):
+    """The streaming decision endpoints check the role BEFORE streaming (normal JSON 403)."""
+    r = api.post(
+        f"/api/agent/actions/{uuid.uuid4()}/{decision}/stream",
+        json={},
+        headers=h(token(BOB), tenant_a),
+    )
+    assert r.headers["content-type"].startswith("application/json")
+    assert (r.status_code, r.json()["error"]["code"]) == (403, "action_forbidden")
+
+
 def test_demo_header_mode_is_refused_in_production(committed, tenant_a):
     app = create_app(make_settings(app_env="production", auth_mode="demo"))
     r = TestClient(app).get("/api/customers", headers={"X-Tenant-ID": str(tenant_a.tenant_id)})

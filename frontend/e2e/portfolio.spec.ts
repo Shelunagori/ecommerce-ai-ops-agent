@@ -32,7 +32,11 @@ async function ask(page: Page, text: string) {
 }
 
 const kinds = (page: Page) =>
-  page.getByTestId("trace-panel").getByTestId("trace-step").evaluateAll((els) => els.map((e) => e.getAttribute("data-kind")));
+  // executed steps only (capabilities the run did not use are listed as skipped after it)
+  page
+    .getByTestId("trace-panel")
+    .locator('[data-testid="trace-step"]:not([data-status="skipped"])')
+    .evaluateAll((els) => els.map((e) => e.getAttribute("data-kind")));
 
 test.describe("desktop", () => {
   test.use({ viewport: { width: 1400, height: 900 } });

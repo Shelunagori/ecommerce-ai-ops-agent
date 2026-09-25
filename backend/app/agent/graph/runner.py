@@ -49,9 +49,10 @@ from app.agent.assistant.result import (
     ToolCallSummary,
 )
 from app.agent.context import AgentContext
+from app.agent.events import NULL_EMITTER, Capability, RunEmitter, emitter_scope
 from app.agent.graph.builder import _action_factory, build_commerce_graph, recursion_limit_for
 from app.agent.graph.nodes import PolicyRetriever, approval_text
-from app.agent.graph.profile import RAG_PROFILE, GraphProfile
+from app.agent.graph.profile import PUBLIC_DEMO_PROFILE, RAG_PROFILE, GraphProfile
 from app.agent.graph.routing import MODEL
 from app.agent.graph.state import (
     RUN_RESET,
@@ -63,7 +64,19 @@ from app.agent.graph.state import (
 from app.agent.llm import LLMProvider
 from app.agent.rag.capability import SEARCH_POLICY_KNOWLEDGE
 from app.agent.tools import build_commerce_tools
-from app.agent.trace import build_execution_trace
+from app.agent.trace import (
+    EXECUTION_LABEL,
+    GROUNDING_LABEL,
+    PROPOSAL_LABEL,
+    RESPONSE_LABEL,
+    RETRIEVAL_LABEL,
+    ExecutionTraceEvent,
+    TraceEventKind,
+    TraceStatus,
+    TraceStep,
+    build_execution_trace,
+    request_step,
+)
 from app.core.request_context import request_id_var
 
 logger = logging.getLogger("app.agent.graph")
@@ -130,14 +143,42 @@ class CommerceGraphAssistant:
         """LangGraph config for a tenant-scoped thread (raises ValueError for a bad ID)."""
         return {"configurable": {"thread_id": checkpoint_thread_key(context.tenant_id, thread_id)}}
 
+    @property
+    def public_demo(self) -> bool:
+        return self._profile is PUBLIC_DEMO_PROFILE
+
+    def run_capabilities(self) -> list[Capability]:
+        """Step kinds a user run of THIS graph can execute (live-trace placeholders). Not a
+        prediction: which ones actually run is decided by the model, turn by turn."""
+        caps = [Capability(kind=TraceEventKind.COMMERCE_TOOL, label="Commerce tools")]
+        if self._profile.policy_knowledge:
+            caps.append(Capability(kind=TraceEventKind.RETRIEVAL, label=RETRIEVAL_LABEL))
+            caps.append(Capability(kind=TraceEventKind.GROUNDING, label=GROUNDING_LABEL))
+        if self._profile.actions:
+            caps.append(Capability(kind=TraceEventKind.ACTION_PROPOSAL, label=PROPOSAL_LABEL))
+        caps.append(Capability(kind=TraceEventKind.RESPONSE, label=RESPONSE_LABEL))
+        return caps
+
     def run(
-        self, text: str, context: AgentContext, *, thread_id: str | None = None
+        self,
+        text: str,
+        context: AgentContext,
+        *,
+        thread_id: str | None = None,
+        events: RunEmitter | None = None,
     ) -> AssistantResult:
+        """``events``: optional live run-event emitter (streaming API). Emission never
+        changes the run; without one, nothing is emitted."""
         with _state_errors(), _request_scope(context):
-            return self._run(text, context, thread_id=thread_id)
+            return self._run(text, context, thread_id=thread_id, events=events or NULL_EMITTER)
 
     def _run(
-        self, text: str, context: AgentContext, *, thread_id: str | None = None
+        self,
+        text: str,
+        context: AgentContext,
+        *,
+        thread_id: str | None = None,
+        events: RunEmitter = NULL_EMITTER,
     ) -> AssistantResult:
         if not isinstance(context, AgentContext):
             raise TypeError("context must be a validated AgentContext")
@@ -146,6 +187,11 @@ class CommerceGraphAssistant:
         config: dict[str, Any] = {}
         turn_id: str | None = None  # id of this run's user message (checkpointed runs only)
         values: dict[str, Any] = {}
+        capabilities = self.run_capabilities()
+        events.run_started(capabilities)
+        request = events.start(
+            TraceEventKind.REQUEST, "Request received", "Validating input and thread scope"
+        )
         try:
             config = self._config(context, thread_id)
             thread_key = config.get("configurable", {}).get("thread_id")
@@ -153,24 +199,80 @@ class CommerceGraphAssistant:
             if not cleaned or len(cleaned) > MAX_INPUT_CHARS:
                 raise AssistantError("agent_input_invalid")
             if self._actions is not None:
-                self._settle_pending_approval(config, context)
+                self._settle_pending_approval(config, context)  # never reported live
             graph_input = self._input(cleaned, config, context)
             if self._checkpointed:
                 turn_id = graph_input["messages"][-1].id
+            events.finish(request, request_step(public_demo=self.public_demo))
+            request = None
             try:
-                values = self._graph.invoke(graph_input, config, context=context)
+                with emitter_scope(events):
+                    values = self._graph.invoke(graph_input, config, context=context)
             except GraphRecursionError:  # defensive only; app limits should stop first
                 raise AssistantError("agent_limit_exceeded", detail="recursion_limit") from None
             result = self._result(values, started)
         except AssistantError as exc:
+            self._report_failure(events, capabilities, exc, request)
             self._enrich(exc, values)
             closed = None
             if turn_id is not None:
                 closed = self._close_failed_turn(config, context, turn_id, exc)
             self._log(context, values, exc.code, started, thread_key, exc.detail, closed)
             raise
+        except BaseException:
+            events.fail_open_steps("The step did not complete")
+            raise
+        self._report_success(events, capabilities, result)
         self._log(context, values, _outcome(values), started, thread_key)
         return result
+
+    # --- live run events (reporting only; never alters the run) -------------------------------
+    @staticmethod
+    def _report_failure(
+        events: RunEmitter,
+        capabilities: list[Capability],
+        exc: AssistantError,
+        request: str | None,
+    ) -> None:
+        if request is not None:
+            events.fail(
+                request,
+                TraceEventKind.REQUEST,
+                "Request received",
+                f"The request could not be accepted ({exc.code})",
+            )
+        events.fail_open_steps("The step did not complete")
+        events.skip_unused(capabilities, "Not run: the run stopped")
+
+    @staticmethod
+    def _report_success(
+        events: RunEmitter, capabilities: list[Capability], result: AssistantResult
+    ) -> None:
+        """Steps decided by the finished run itself: the approval pause (fixed graph path:
+        approval -> execution -> response), the checkpoint and the response. Built from the
+        final trace entries, so the stream ends exactly where the final trace ends."""
+        tail: list[ExecutionTraceEvent] = []
+        for ev in reversed(result.execution_trace):
+            waiting_approval = (
+                ev.kind is TraceEventKind.APPROVAL and ev.status is TraceStatus.WAITING
+            )
+            if ev.kind in (TraceEventKind.RESPONSE, TraceEventKind.CHECKPOINT) or waiting_approval:
+                tail.insert(0, ev)
+            else:
+                break
+        for ev in tail:
+            step = TraceStep(ev.kind, ev.label, ev.status, ev.detail, dict(ev.metadata))
+            if ev.kind is TraceEventKind.APPROVAL:
+                events.approval_required(
+                    step,
+                    [
+                        Capability(kind=TraceEventKind.ACTION_EXECUTION, label=EXECUTION_LABEL),
+                        Capability(kind=TraceEventKind.RESPONSE, label=RESPONSE_LABEL),
+                    ],
+                )
+            else:
+                events.finish(None, step)
+        events.skip_unused(capabilities, "Not used in this run")
 
     def history(self, context: AgentContext, thread_id: str) -> list[dict[str, str]]:
         """User-visible conversation only: user messages and final assistant messages
@@ -205,10 +307,29 @@ class CommerceGraphAssistant:
             return None
         return snapshot.values.get("pending_action")
 
-    def resume(self, context: AgentContext, **kw: Any) -> AssistantResult:
-        """See ``_resume``. Checkpoint-store failures surface as ``agent_state_unavailable``."""
-        with _state_errors(), _request_scope(context):
-            return self._resume(context, **kw)
+    def resume(
+        self, context: AgentContext, *, events: RunEmitter | None = None, **kw: Any
+    ) -> AssistantResult:
+        """See ``_resume``. Checkpoint-store failures surface as ``agent_state_unavailable``.
+        ``events``: optional live run-event emitter (reporting only)."""
+        emitter = events or NULL_EMITTER
+        capabilities = [
+            Capability(kind=TraceEventKind.APPROVAL, label="Human decision"),
+            Capability(kind=TraceEventKind.ACTION_EXECUTION, label=EXECUTION_LABEL),
+            Capability(kind=TraceEventKind.RESPONSE, label=RESPONSE_LABEL),
+        ]
+        emitter.run_started(capabilities)
+        try:
+            with _state_errors(), _request_scope(context), emitter_scope(emitter):
+                result = self._resume(context, **kw)
+        except AssistantError as exc:
+            self._report_failure(emitter, capabilities, exc, None)
+            raise
+        except BaseException:
+            emitter.fail_open_steps("The step did not complete")
+            raise
+        self._report_success(emitter, capabilities, result)
+        return result
 
     def _resume(
         self,
@@ -398,6 +519,7 @@ class CommerceGraphAssistant:
                 durable_checkpoints=self._durable_checkpoints,
                 paused=paused,
                 action=action,
+                public_demo=self.public_demo,
             ),
         )
 

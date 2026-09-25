@@ -14,6 +14,7 @@ import {
 } from "@/components/review/content";
 import { EVIDENCE, EVIDENCE_AS_OF } from "@/components/review/evidence";
 import FlowWalkthrough from "@/components/review/FlowWalkthrough";
+import LiveTraceIllustration from "@/components/review/LiveTraceIllustration";
 
 export const metadata: Metadata = {
   title: "Engineering review · CommerceOps AI",
@@ -25,6 +26,7 @@ const NAV = [
   ["overview", "Overview"],
   ["architecture", "Architecture"],
   ["agent-flow", "Agent Flow"],
+  ["live-trace", "Live Trace"],
   ["rag", "RAG"],
   ["hitl", "HITL"],
   ["security", "Security"],
@@ -160,6 +162,34 @@ export default function ReviewPage() {
           lead="The graph paths behind four request types. In the app, every answer carries the backend-recorded execution trace of the run that produced it."
         >
           <FlowWalkthrough />
+        </Section>
+
+        <Section
+          id="live-trace"
+          title="Real-time execution trace"
+          lead="While a run executes, the backend streams its real execution boundaries to the browser: each model call, commerce tool, policy retrieval, grounding check, approval pause and deterministic execution appears as it starts and turns green (or red) when it ends."
+        >
+          <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-start">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Card
+                title="Real backend events"
+                body="Emitted by the graph nodes at the moment work starts and ends — never frontend timers. A step is amber only while that operation is really running."
+              />
+              <Card
+                title="Not chain-of-thought"
+                body="No prompts, model reasoning, retrieved policy text, SQL, embeddings or tool arguments — fixed labels, counts, outcomes and measured durations only."
+              />
+              <Card
+                title="Converges on the final trace"
+                body="Streamed steps are built by the same code as the response's execution_trace; a test proves they never disagree."
+              />
+              <Card
+                title="Disconnect-safe"
+                body="Streaming is POST + fetch (body, bearer token, tenant header). If the browser disconnects the run still finishes once; writes stay idempotent and durable."
+              />
+            </div>
+            <LiveTraceIllustration />
+          </div>
         </Section>
 
         <Section

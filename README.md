@@ -29,9 +29,11 @@ See [docs/COMPLETION_STATUS.md](docs/COMPLETION_STATUS.md).
 * **Try Live Demo** — no sign-up: a Supabase anonymous session gets read-only access to the
   shared synthetic BluePeak tenant ("Public Demo · Read-only"); conversations stay private
   to each visitor. Reviewer accounts keep the full human-approval flow.
-* **Agent Execution Trace** — every answer shows what the run actually did, in order: graph
-  steps, tools, retrieval (pgvector or full-text), grounding, approval and execution — safe
-  metadata only, never prompts or model reasoning.
+* **Live Agent Execution Trace** — the moment you press Send, a timeline opens and follows
+  the run's real backend steps as they happen (amber while running, green when done, red on
+  failure): graph steps, tools, retrieval (pgvector or full-text), grounding, approval pause
+  and execution — streamed over SSE (`POST /api/agent/messages/stream`), safe metadata only,
+  never prompts or model reasoning.
 * **`/review`** — a public engineering case study: architecture, request flows, RAG, HITL,
   security boundaries, evaluation evidence and deployment.
 

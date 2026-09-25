@@ -434,3 +434,54 @@ deployments. Decisions marked **(V)** are the implementer's and can be vetoed.
   tool in the safety test), security X1–X14 re-run on the new tree.
 - **Blocked / manual:** enable Supabase Anonymous Sign-Ins; set `PUBLIC_DEMO_ENABLED=true` on
   Railway; live Gemini/Supabase not exercised from the sandbox.
+
+## Live execution trace (streaming)
+
+**Status:** complete locally. Nothing committed or deployed by the assistant.
+
+- **Transport:** `POST /api/agent/messages/stream` and
+  `POST /api/agent/actions/{id}/approve|reject/stream` (`text/event-stream`, read with
+  `fetch()` + `ReadableStream`; EventSource cannot send a body, bearer token or tenant
+  header). Same `assistant.run` / `_decide` → `resume` as the JSON endpoints, which are
+  unchanged. Auth, tenant, rate limit and capability profile are checked before streaming.
+- **Events:** `app/agent/events.py` (`RunEmitter`, strict `RunEvent` schema: run_started,
+  step_started/completed/failed/skipped, approval_required/resolved, run_completed/failed).
+  Emitted at the real boundaries by the runner and the MODEL / TOOLS / RETRIEVE / PROPOSE /
+  EXECUTE nodes; finished steps use the same builders as `execution_trace`
+  (`app/agent/trace.py` refactored into per-step builders). Sink failures are swallowed.
+- **Worker model:** `app/api/streaming.py` runs the synchronous run in a worker thread and
+  drains an event queue; 15 s heartbeats; a disconnect never cancels a run (V) and nothing is
+  retried.
+- **Frontend:** `src/lib/sse.ts` (incremental parser), `src/lib/stream.ts` (outcomes:
+  completed / failed / unsupported → single JSON fallback / interrupted → reload only /
+  aborted), `src/lib/liveTrace.ts` (reducer, convergence on the final trace),
+  `components/agent/trace/LiveTrace.tsx` (amber running pulse + live timer, green check,
+  red failure with `role=alert`, gray capabilities, "Not used"/"Not run" skipped rows,
+  approval waiting without spinner, auto-follow, reduced motion), `ChatPanel` wiring (panel
+  opens on Send, "CommerceOps AI is working… / Current step", mobile "View live execution",
+  live approve/reject). `/review` gains a "Real-time execution trace" section with a labelled
+  UI illustration.
+- **Contract changes (documented):** trace approval step metadata `decision` (approved /
+  rejected / expired) instead of `action_status` (the same value live and final); execution
+  step adds `audit_recorded: true` on success; a failed retrieval's detail is "Policy
+  retrieval service was unavailable"; a proposal refused by a database error is `failed`
+  (was `rejected`). The request step of the public demo says "read-only public demo (no action
+  tools)". e2e: `agent.spec.ts` routes the stream endpoint for its offline test;
+  `portfolio.spec.ts` ignores the new skipped rows.
+- **Harness:** `tests/e2e/server.py` gains `/__e2e/pacing` (each real model call / tool /
+  retrieval / action execution takes ≥ n ms) and `/__e2e/faults` (retrieval failure).
+- **Tests added:** backend `tests/db/test_agent_stream.py` (30), `tests/test_run_events.py`
+  (11), `tests/db/test_auth.py` (+2 stream role checks); frontend `stream.test.ts` (10),
+  `liveTrace.test.ts` (4), `LiveTrace.test.tsx` (6), `ChatPanelLive.test.tsx` (8),
+  `ReviewPage` (+1); Playwright `e2e/live.spec.ts` (4).
+- **Results (2026-09-25, measured this iteration):** backend **1389 passed, 22 skipped**
+  (baseline 1346/22), no-DB run 769 passed; `ruff`, `ruff format`, `uv lock --check`,
+  `alembic upgrade head` + `alembic check` clean; frontend lint/typecheck clean, **80** unit
+  tests (baseline 51), build OK; Playwright **20/20** in dev and in the production build
+  (`next build && next start`), `live.spec.ts` 5× repeated 20/20; gitleaks (history + source
+  dirs) clean; pip-audit and `npm audit` clean; actionlint clean.
+- **Mutations (all red, restored):** live trace L1–L15 (backend) and F1–F8 (frontend; F3 first
+  stayed green as a no-op and was replaced by a real "client clock instead of backend
+  duration" mutation); security X1–X14 re-run on the new tree (X11 now covers both chat
+  endpoints; X6 is also caught by the new stream role tests).
+- **Manual / not verified here:** SSE through Railway + Vercel (P26); live Gemini/Supabase.

@@ -41,4 +41,13 @@ describe("/review (public, no auth)", () => {
     expect(text).not.toMatch(/service_role|anon key|password|postgresql:\/\/|GEMINI_API_KEY=/i);
     expect(screen.getByText("hit@1 1.00 vs 0.40")).toBeInTheDocument();
   });
+  it("explains the live trace and labels its illustration as not a live run", () => {
+    render(<ReviewPage />);
+    const section = screen.getByRole("region", { name: "Real-time execution trace" });
+    expect(within(section).getByText("Not chain-of-thought")).toBeInTheDocument();
+    expect(within(section).getByText(/never frontend timers/)).toBeInTheDocument();
+    const figure = within(section).getByTestId("live-trace-illustration");
+    expect(within(figure).getByText("UI illustration — not a live run")).toBeInTheDocument();
+    expect(within(screen.getByRole("navigation", { name: "Review sections" })).getByRole("link", { name: "Live Trace" })).toHaveAttribute("href", "#live-trace");
+  });
 });

@@ -204,6 +204,8 @@ def test_trace_contains_only_safe_metadata(h, tenant_a):
         "action_type",
         "error_code",
         "action_status",
+        "decision",  # approval step (live-trace phase)
+        "audit_recorded",  # execution step (live-trace phase)
         "durable",
         "citations_verified",
         "model_calls",

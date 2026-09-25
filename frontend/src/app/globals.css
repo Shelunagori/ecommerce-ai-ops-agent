@@ -3,3 +3,57 @@
 @theme {
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
+
+/*
+ * Live execution trace motion (subtle, CSS only). Applied only while a step is really running
+ * or has just changed state; everything is switched off for prefers-reduced-motion (the
+ * status icon, color and text stay).
+ */
+@keyframes trace-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.82); }
+}
+@keyframes trace-glow {
+  0%, 100% { box-shadow: inset 2px 0 0 0 rgb(245 158 11 / 0.9), 0 0 0 0 rgb(245 158 11 / 0); }
+  50% { box-shadow: inset 2px 0 0 0 rgb(245 158 11 / 0.9), 0 0 0 3px rgb(245 158 11 / 0.12); }
+}
+@keyframes trace-shimmer {
+  from { background-position: -200% 0; }
+  to { background-position: 200% 0; }
+}
+@keyframes trace-pop {
+  0% { transform: scale(0.6); opacity: 0.4; }
+  70% { transform: scale(1.12); opacity: 1; }
+  100% { transform: scale(1); }
+}
+@keyframes trace-fail {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(225 29 72 / 0); }
+  40% { box-shadow: 0 0 0 3px rgb(225 29 72 / 0.18); }
+}
+@keyframes trace-appear {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
+}
+
+.trace-dot-running { animation: trace-pulse 1.4s ease-in-out infinite; }
+.trace-row-running {
+  animation: trace-glow 2s ease-in-out infinite;
+  background-image: linear-gradient(90deg, transparent 0%, rgb(254 243 199 / 0.55) 50%, transparent 100%);
+  background-size: 200% 100%;
+}
+.trace-row-running.trace-shimmer { animation: trace-glow 2s ease-in-out infinite, trace-shimmer 2.4s linear infinite; }
+.trace-icon-pop { animation: trace-pop 0.32s ease-out 1; }
+.trace-row-failed { animation: trace-fail 0.9s ease-out 1; }
+.trace-row-appear { animation: trace-appear 0.25s ease-out 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .trace-dot-running,
+  .trace-row-running,
+  .trace-row-running.trace-shimmer,
+  .trace-icon-pop,
+  .trace-row-failed,
+  .trace-row-appear {
+    animation: none !important;
+    background-image: none !important;
+  }
+}

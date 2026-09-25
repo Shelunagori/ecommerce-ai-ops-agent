@@ -24,10 +24,11 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.actions import errors as action_errors
 from app.actions.capability import ACTION_TOOLS, action_tools, parse_action_call
-from app.agent.assistant.executor import ToolExecutionError, ToolExecutor
+from app.agent.assistant.executor import ToolExecutionError, ToolExecutor, safe_name
 from app.agent.assistant.limits import AssistantLimits
 from app.agent.assistant.result import RetrievalSummary
 from app.agent.context import AgentContext
+from app.agent.events import RunEventType, current_emitter
 from app.agent.graph.profile import GraphProfile
 from app.agent.graph.routing import evaluate_model_turn
 from app.agent.graph.state import CommerceGraphState, GraphError, scope_digest
@@ -41,6 +42,23 @@ from app.agent.rag.capability import (
 )
 from app.agent.rag.context import format_policy_results, invalid_arguments_text
 from app.agent.rag.grounding import check_citations, check_grounding
+from app.agent.trace import (
+    EXECUTED_STATUSES,
+    EXECUTION_LABEL,
+    GROUNDING_LABEL,
+    MODEL_LABEL,
+    PROPOSAL_LABEL,
+    RETRIEVAL_LABEL,
+    TraceEventKind,
+    decision_step,
+    execution_step,
+    grounding_step,
+    model_detail,
+    model_step,
+    proposal_step,
+    retrieval_step,
+    tool_step,
+)
 from app.knowledge.embeddings.errors import EmbeddingError
 from app.knowledge.retrieval import RetrievalResult
 
@@ -133,6 +151,15 @@ class GraphNodes:
         round_no = state.get("model_calls", 0) + 1
         update["model_calls"] = round_no
         prompt = self._profile.prompt
+        events = current_emitter()
+        provider = self._provider.info.provider
+        step = events.start(
+            TraceEventKind.MODEL,
+            MODEL_LABEL,
+            "Deciding the next step",
+            call=round_no,
+            provider=provider,
+        )
         try:
             chat = self._provider.invoke_chat(
                 state["messages"],
@@ -141,6 +168,14 @@ class GraphNodes:
                 prompt_version=prompt.PROMPT_VERSION,
             )
         except LLMError as exc:
+            events.fail(
+                step,
+                TraceEventKind.MODEL,
+                MODEL_LABEL,
+                f"Model provider call failed ({exc.code})",
+                call=round_no,
+                provider=provider,
+            )
             return {**update, "pending": None, "error": _error(exc.code, "llm", exc.message)}
         ai: AIMessage = chat.message  # the provider's original message, never rebuilt
 
@@ -160,12 +195,38 @@ class GraphNodes:
             action_attempts=len(state.get("action_calls", [])),
         )
         if decision.kind in ("tools", "retrieve", "action"):
+            names = (
+                [safe_name(c.get("name")) or "<invalid>" for c in ai.tool_calls]
+                if decision.kind == "tools"
+                else []
+            )
+            detail = model_detail(
+                names,
+                retrieval=decision.kind == "retrieve",
+                proposal=decision.kind == "action",
+                final=False,
+            )
+            events.finish(step, model_step(round_no, provider, detail))
             seen = [*state.get("seen_tool_call_ids", []), *decision.new_call_ids]
             kind = {"retrieve": "retrieval", "action": "action"}.get(decision.kind, "commerce")
             return {**update, "pending": ai, "pending_kind": kind, "seen_tool_call_ids": seen}
         if decision.kind == "answer":
+            final_detail = model_detail([], retrieval=False, proposal=False, final=True)
+            events.finish(step, model_step(round_no, provider, final_detail))
             if self._profile.policy_knowledge:
                 sources = {s["citation"]: s for s in state.get("policy_sources", [])}
+                # Reported only where the final trace reports it: after policy retrieval (or
+                # when validation actually rejects the answer).
+                reported = status in ("success", "no_results")
+                g_step = (
+                    events.start(
+                        TraceEventKind.GROUNDING,
+                        GROUNDING_LABEL,
+                        "Checking citations against this run's sources",
+                    )
+                    if reported
+                    else None
+                )
                 grounding = check_grounding(
                     decision.answer or "",
                     status=status,  # type: ignore[arg-type]
@@ -173,14 +234,30 @@ class GraphNodes:
                     earlier=earlier_policy_citations(state["messages"]),
                 )
                 if not grounding.ok:
+                    events.fail(
+                        g_step,
+                        TraceEventKind.GROUNDING,
+                        GROUNDING_LABEL,
+                        "The answer failed citation validation and was not returned",
+                    )
                     # The ungrounded answer is neither returned nor kept in history.
                     return {
                         **update,
                         "pending": None,
                         "error": _error("agent_grounding_error", grounding.detail),
                     }
+                if reported:
+                    events.finish(g_step, grounding_step(len(grounding.citations)))
                 update["citations"] = grounding.citations
             return {**update, "pending": None, "messages": [ai], "answer": decision.answer}
+        events.fail(
+            step,
+            TraceEventKind.MODEL,
+            MODEL_LABEL,
+            f"Model response rejected ({decision.error_code or 'agent_protocol_error'})",
+            call=round_no,
+            provider=provider,
+        )
         invalid = [
             *state.get("invalid_tool_calls", []),
             *(c.model_dump(mode="json") for c in decision.invalid_calls),
@@ -201,10 +278,25 @@ class GraphNodes:
         round_no = state.get("model_calls", 0)
         summaries = list(state.get("tool_calls", []))
         tool_messages = []
+        events = current_emitter()
         for call in ai.tool_calls:  # sequential, in request order; no model call in between
+            name = safe_name(call.get("name")) or "<invalid>"
+            step = events.start(
+                TraceEventKind.COMMERCE_TOOL,
+                f"Tool: {name}",
+                "Deterministic, tenant-scoped PostgreSQL lookup",
+                tool=name,
+            )
             try:
                 message, summary = self._executor.execute(call, context, round_no)
             except ToolExecutionError:
+                events.fail(
+                    step,
+                    TraceEventKind.COMMERCE_TOOL,
+                    f"Tool: {name}",
+                    "The tool result could not be processed",
+                    tool=name,
+                )
                 return {
                     "pending": None,
                     "pending_kind": None,
@@ -213,6 +305,7 @@ class GraphNodes:
                 }
             tool_messages.append(message)
             summaries.append(summary.model_dump(mode="json"))
+            events.finish(step, tool_step(summaries[-1]), duration_ms=summary.duration_ms)
         # One update: the original AIMessage, then its complete ordered ToolMessage batch.
         return {
             "messages": [ai, *tool_messages],
@@ -232,6 +325,13 @@ class GraphNodes:
         started = time.perf_counter()
         retrievals = list(state.get("retrievals", []))
         status = state.get("policy_retrieval_status", "none")
+        events = current_emitter()
+        step = events.start(
+            TraceEventKind.RETRIEVAL, RETRIEVAL_LABEL, "Searching tenant-scoped policy knowledge"
+        )
+
+        def report(entry: dict[str, Any]) -> None:
+            events.finish(step, retrieval_step(entry), duration_ms=entry.get("duration_ms"))
 
         def summary(**fields: Any) -> dict[str, Any]:
             ms = round((time.perf_counter() - started) * 1000, 1)
@@ -259,6 +359,7 @@ class GraphNodes:
                     rejected_argument_names=exc.rejected,
                 )
             )
+            report(retrievals[-1])
             return {
                 "messages": [ai, message],
                 "pending": None,
@@ -286,6 +387,7 @@ class GraphNodes:
                     as_of=None, result_count=0, citations=[], outcome="error", error_code=detail
                 )
             )
+            report(retrievals[-1])
             # Terminal: nothing appended, the model is not called again.
             return {
                 "pending": None,
@@ -329,6 +431,7 @@ class GraphNodes:
                 retriever=result.retriever,
             )
         )
+        report(retrievals[-1])
         # One update: the original AIMessage and its retrieval ToolMessage.
         return {
             "messages": [ai, message],
@@ -434,6 +537,10 @@ class ActionNodes:
         round_no = state.get("model_calls", 0)
         attempts = list(state.get("action_calls", []))
         summary: dict[str, Any] = {"round": round_no, "capability": call.get("name")}
+        events = current_emitter()
+        step = events.start(
+            TraceEventKind.ACTION_PROPOSAL, PROPOSAL_LABEL, "Validating against server-side rules"
+        )
         try:
             proposal = parse_action_call(call.get("name", ""), call.get("args"))
             sources = {s["citation"]: s for s in state.get("policy_sources", [])}
@@ -468,6 +575,7 @@ class ActionNodes:
             # Invalid / not allowed: nothing persisted; the model may explain or correct.
             code = exc.detail if exc.code == "action_invalid_arguments" and exc.detail else exc.code
             attempts.append({**summary, "outcome": "rejected", "error_code": code})
+            events.finish(step, proposal_step(attempts[-1]))
             message = _json_tool_message(
                 call["id"],
                 call.get("name") or "action",
@@ -482,6 +590,7 @@ class ActionNodes:
             }
         except SQLAlchemyError:
             attempts.append({**summary, "outcome": "error", "error_code": "database_unavailable"})
+            events.finish(step, proposal_step(attempts[-1]))
             return {
                 "pending": None,
                 "pending_kind": None,
@@ -489,6 +598,7 @@ class ActionNodes:
                 "error": _error("agent_action_error", "database_unavailable"),
             }
         attempts.append({**summary, "outcome": "pending_approval", "action_id": str(view.id)})
+        events.finish(step, proposal_step(attempts[-1]))
         # The proposal AIMessage stays in ``pending`` (checkpointed) until EXECUTE appends it
         # together with its ToolMessage, so history is never left with an unanswered call.
         return {"pending_action": view.as_dict(), "action_calls": attempts}
@@ -514,15 +624,38 @@ class ActionNodes:
             raise RuntimeError("execute node reached without a pending action")
         service = self._service()
         action_id = uuid.UUID(pending["id"])
+        events = current_emitter()
+        step: str | None = None
+        executing = False
         try:
             view = service.get(context.tenant, action_id)
+            if view.status != "pending_approval":
+                # The human decision as recorded in PostgreSQL (the authority), not the UI's.
+                events.finish(
+                    None,
+                    decision_step(view.as_dict()),
+                    event_type=RunEventType.APPROVAL_RESOLVED,
+                )
             if view.status in ("approved", "executing", "succeeded"):
+                executing = True
+                step = events.start(
+                    TraceEventKind.ACTION_EXECUTION,
+                    EXECUTION_LABEL,
+                    "Executing once in one database transaction",
+                    action_type=view.action_type,
+                )
                 try:
                     view = service.execute(context.tenant, action_id)
                 except action_errors.ActionError:
                     # failed / expired / precondition changed: report the DB's truth
                     view = service.get(context.tenant, action_id)
                 if view.status == "executing":  # someone else is executing it right now
+                    events.fail(
+                        step,
+                        TraceEventKind.ACTION_EXECUTION,
+                        EXECUTION_LABEL,
+                        "Another request is executing this action right now",
+                    )
                     return {
                         "pending": None,
                         "error": _error("agent_action_error", "action_in_progress"),
@@ -533,10 +666,32 @@ class ActionNodes:
                     "error": _error("agent_protocol_error", "approval_not_decided"),
                 }
         except action_errors.ActionError as exc:
+            if executing:
+                events.fail(
+                    step,
+                    TraceEventKind.ACTION_EXECUTION,
+                    EXECUTION_LABEL,
+                    f"The action service refused the request ({exc.code})",
+                )
             return {"pending": None, "error": _error("agent_action_error", exc.code)}
         except SQLAlchemyError:
+            if executing:
+                events.fail(
+                    step,
+                    TraceEventKind.ACTION_EXECUTION,
+                    EXECUTION_LABEL,
+                    "The action service was unavailable; the approved request stays retryable",
+                )
             return {"pending": None, "error": _error("agent_action_error", "database_unavailable")}
         final = view.as_dict()
+        if executing and final["status"] in EXECUTED_STATUSES:
+            events.finish(step, execution_step(final))
+        elif final["status"] not in EXECUTED_STATUSES:
+            events.skip(
+                TraceEventKind.ACTION_EXECUTION,
+                EXECUTION_LABEL,
+                "Not executed: nothing was changed",
+            )
         call = ai.tool_calls[0]
         tool_message = _json_tool_message(
             call["id"],

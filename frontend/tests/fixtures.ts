@@ -3,6 +3,7 @@ import type {
   AgentResponse,
   ExecutionTraceEvent,
   PolicyCitation,
+  RunEvent,
   TraceEventKind,
   TraceStatus,
 } from "@/lib/types";
@@ -105,7 +106,97 @@ export const APPROVAL_TRACE = [
 
 export const DECIDED_TRACE = [
   ...APPROVAL_TRACE.slice(0, 3),
-  ev(4, "approval", "Approved by a human", { action_status: "succeeded" }),
+  ev(4, "approval", "Approved by a human", { action_type: "cancel_order", decision: "approved" }),
   ev(5, "action_execution", "Deterministic execution", { action_status: "succeeded" }, "completed", "Executed once by application code; audit event recorded"),
   ev(6, "response", "Outcome recorded", { model_calls: 1, duration_ms: 40 }),
 ];
+
+// --- live run events (streaming) -------------------------------------------------------------
+
+export const RUN_ID = "a".repeat(32);
+
+/** Builds a run's event list with increasing sequence numbers. */
+export function runEvents(runId = RUN_ID) {
+  let seq = 0;
+  return (type: RunEvent["type"], fields: Partial<RunEvent> = {}): RunEvent => ({
+    type,
+    run_id: runId,
+    sequence: ++seq,
+    elapsed_ms: seq * 10,
+    ...fields,
+  });
+}
+
+export function sse(...events: RunEvent[]): string {
+  return events.map((e) => `event: ${e.type}\nid: ${e.sequence}\ndata: ${JSON.stringify(e)}\n\n`).join("");
+}
+
+export const AGENT_CAPS = [
+  { kind: "commerce_tool", label: "Commerce tools" },
+  { kind: "retrieval", label: "Policy retrieval" },
+  { kind: "grounding", label: "Grounding validation" },
+  { kind: "action_proposal", label: "Action proposal" },
+  { kind: "response", label: "Response generated" },
+] as RunEvent["capabilities"];
+
+/** A controllable text/event-stream body: chunks are delivered one `release()` at a time. */
+export function controlledStream() {
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c;
+    },
+  });
+  const enc = new TextEncoder();
+  return {
+    response: () => new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    push: (text: string) => controller.enqueue(enc.encode(text)),
+    close: () => controller.close(),
+    error: () => controller.error(new TypeError("network error")),
+  };
+}
+
+type StreamRoute = {
+  method?: string;
+  path: string | RegExp;
+  status?: number;
+  body?: unknown;
+  /** A full SSE body, or a controlled stream. */
+  sse?: string | ReturnType<typeof controlledStream>;
+};
+
+/** Like mockFetch, but routes may answer with an event stream. Records every call. */
+export function mockFetchStreams(routes: StreamRoute[]) {
+  const calls: Array<{ method: string; url: string; body: unknown; headers: Record<string, string>; signal?: AbortSignal }> = [];
+  const fn = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    calls.push({
+      method,
+      url,
+      body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      headers: (init?.headers ?? {}) as Record<string, string>,
+      signal: init?.signal ?? undefined,
+    });
+    const idx = routes.findIndex((r) => (r.method ?? "GET") === method && (typeof r.path === "string" ? url.endsWith(r.path) : r.path.test(url)));
+    if (idx < 0) return new Response(JSON.stringify({ error: { code: "route_not_found", message: "no mock" } }), { status: 404 });
+    const [route] = routes.splice(idx, 1);
+    if (route.sse !== undefined) {
+      if (typeof route.sse === "string") {
+        return new Response(route.sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }
+      const stream = route.sse.response();
+      init?.signal?.addEventListener("abort", () => {
+        try {
+          (route.sse as ReturnType<typeof controlledStream>).error();
+        } catch {
+          /* already closed */
+        }
+      });
+      return stream;
+    }
+    return new Response(JSON.stringify(route.body), { status: route.status ?? 200, headers: { "Content-Type": "application/json" } });
+  };
+  globalThis.fetch = fn as typeof fetch;
+  return calls;
+}

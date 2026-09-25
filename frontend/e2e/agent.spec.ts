@@ -162,7 +162,8 @@ test("tenants keep separate conversations; switching back restores history", asy
 test("a failed request shows a retryable error and retry reaches the backend", async ({ page }) => {
   await open(page, "northstar-commerce");
   let failures = 1;
-  await page.route("**/api/agent/messages", (route) => (failures-- > 0 ? route.abort("connectionrefused") : route.continue()));
+  // The UI streams the run (POST /api/agent/messages/stream); fail that request once.
+  await page.route("**/api/agent/messages/stream", (route) => (failures-- > 0 ? route.abort("connectionrefused") : route.continue()));
   await page.getByPlaceholder("Ask CommerceOps AI…").fill("hello");
   await page.getByRole("button", { name: "Send" }).click();
   const alert = page.getByRole("alert").filter({ hasText: "unreachable" });

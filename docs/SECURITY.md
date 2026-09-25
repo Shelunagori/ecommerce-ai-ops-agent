@@ -76,6 +76,25 @@ embeddings, tenant ids or secrets (asserted in `tests/db/test_execution_trace.py
 mutations that must fail). It is returned with the response and not stored with the
 conversation history.
 
+## Live execution trace (streaming)
+
+* Same trust path as the JSON API: auth, tenant selection, rate limit and capability profile
+  (public demo = no action tools) are resolved **before** the stream starts; refusals keep
+  their JSON status codes. The stream then carries only `RunEvent`s: fixed labels, safe
+  details, the trace's closed metadata set, measured durations, and finally the normal
+  response body or a safe error code/message/status (tracebacks stay in server logs).
+* Never streamed: prompts, system messages, chain-of-thought / model reasoning, raw tool
+  messages or arguments, retrieved policy text, SQL, embeddings, tenant ids, JWTs, keys or
+  database URLs (`tests/db/test_agent_stream.py::test_stream_contains_only_safe_fields`).
+* Reporting cannot change execution: emitter/sink failures are swallowed (a test runs a full
+  approve with an exploding sink: one execution, one audit event).
+* A browser disconnect does not stop or duplicate anything: the run completes once
+  server-side; writes keep their transaction + idempotency guarantees; the UI never resends a
+  streamed request (manual "Reload conversation" / manual Retry only). A lost approve stream
+  leaves the decision recorded in PostgreSQL; a repeated approve is idempotent.
+* The public demo's stream shows only its real read-only path: no action capability, no
+  proposal, no approval events.
+
 ## Verification
 
 | Check | Result |
@@ -96,5 +115,7 @@ conversation history.
   mitigated by the CSP and by never rendering HTML (P18).
 * Public demo: no CAPTCHA widget yet (P24); anonymous visitors' checkpoint threads are not
   pruned automatically (P25).
+* Streaming: an abandoned read-only run still finishes and spends model budget (P28); live
+  SSE through the hosted proxies is verified locally only (P26).
 * `arguments_hash` is optional on approve at the API level (the UI always sends it; arguments
   are immutable after proposal) **(V)**.

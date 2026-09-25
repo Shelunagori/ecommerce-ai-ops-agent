@@ -121,7 +121,7 @@ export const DECISIONS = [
   { title: "Durable checkpoints for approvals", body: "A pending approval survives restarts and can be resumed by any API instance." },
   { title: "Provider abstraction", body: "Ollama locally, Gemini hosted; each embedding model is a separate profile — vectors never mix." },
   { title: "Explicit capability boundaries", body: "After retrieval no commerce tool runs; the model can only propose writes; the public demo gets none." },
-  { title: "Honest observability", body: "The execution trace is recorded from real graph execution — safe metadata only, never reasoning or prompts." },
+  { title: "Honest observability", body: "The execution trace is streamed live from real graph execution (SSE over POST) — safe metadata only, never reasoning or prompts." },
 ];
 
 export const DEPLOYMENT = [

@@ -12,6 +12,8 @@ import uuid
 from typing import Any, Literal
 
 from fastapi import APIRouter, Path, Query, Request
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.actions import errors as action_errors
@@ -24,10 +26,12 @@ from app.agent.assistant.result import (
     ToolCallSummary,
 )
 from app.agent.context import AgentContext
+from app.agent.events import RunEmitter
 from app.agent.trace import ExecutionTraceEvent
 from app.api.agent_runtime import internal_thread_id, runtime_for
 from app.api.deps import CurrentPrincipal, ReadSession, get_app_settings, get_jwt_verifier
 from app.api.ratelimit import charge_message
+from app.api.streaming import stream_run
 from app.auth.errors import PublicDemoReadOnlyError
 from app.auth.principal import identity_only
 from app.core.request_context import request_id_var
@@ -177,6 +181,36 @@ def post_message(body: MessageIn, principal: CurrentPrincipal, request: Request)
     return _response(body.thread_id, result)
 
 
+_STREAM_DOC = {
+    200: {
+        "content": {"text/event-stream": {}},
+        "description": "Server-sent run events (see app/agent/events.py); the last event is "
+        "run_completed (with the normal JSON response body) or run_failed.",
+    }
+}
+
+
+@router.post("/agent/messages/stream", response_class=StreamingResponse, responses=_STREAM_DOC)
+async def stream_message(
+    body: MessageIn, principal: CurrentPrincipal, request: Request
+) -> StreamingResponse:
+    """Same run as ``POST /agent/messages``, reporting its real execution steps live.
+
+    Auth, tenant, rate limit and capability selection are checked BEFORE streaming starts, so
+    those refusals keep their normal JSON status codes."""
+    charge_message(request.app, principal)
+    runtime = await run_in_threadpool(runtime_for, request.app)  # may build it (blocking)
+    assistant = runtime.assistant_for(principal)  # read-only graph for the public demo
+    context = _context(principal, request)
+    thread = internal_thread_id(principal.subject, body.thread_id)
+
+    def work(events: RunEmitter) -> AgentResponse:
+        result = assistant.run(body.text, context, thread_id=thread, events=events)
+        return _response(body.thread_id, result)
+
+    return stream_run(work)
+
+
 @router.get("/agent/threads/{thread_id}/messages", response_model=HistoryOut)
 def thread_history(
     principal: CurrentPrincipal,
@@ -217,16 +251,21 @@ def get_action(action_id: uuid.UUID, principal: CurrentPrincipal, request: Reque
     return _action_out(view, actions.events(principal.tenant, action_id))
 
 
+def _check_decider(principal: Any) -> None:
+    _require_actions(principal)
+    if not principal.can_approve:
+        raise action_errors.ActionForbiddenError()
+
+
 def _decide(
     action_id: uuid.UUID,
     decision: Literal["approve", "reject"],
     body: DecisionIn,
     principal: Any,
     request: Request,
+    events: RunEmitter | None = None,
 ) -> DecisionOut:
-    _require_actions(principal)
-    if not principal.can_approve:
-        raise action_errors.ActionForbiddenError()
+    _check_decider(principal)
     runtime = runtime_for(request.app)
     context = _context(principal, request)
     view = runtime.actions.get(principal.tenant, action_id)  # tenant-scoped: other tenant -> 404
@@ -243,6 +282,7 @@ def _decide(
             decision=decision,
             decided_by=principal.subject,
             expected_hash=body.arguments_hash,
+            events=events,
         )
         final = runtime.actions.get(principal.tenant, action_id)
         return DecisionOut(
@@ -284,6 +324,45 @@ def reject(
     action_id: uuid.UUID, body: DecisionIn, principal: CurrentPrincipal, request: Request
 ) -> DecisionOut:
     return _decide(action_id, "reject", body, principal, request)
+
+
+async def _stream_decision(
+    action_id: uuid.UUID,
+    decision: Literal["approve", "reject"],
+    body: DecisionIn,
+    principal: Any,
+    request: Request,
+) -> StreamingResponse:
+    _check_decider(principal)  # role checks before streaming: normal 403 JSON
+
+    def work(events: RunEmitter) -> DecisionOut:
+        return _decide(action_id, decision, body, principal, request, events)
+
+    return stream_run(work)
+
+
+@router.post(
+    "/agent/actions/{action_id}/approve/stream",
+    response_class=StreamingResponse,
+    responses=_STREAM_DOC,
+)
+async def approve_stream(
+    action_id: uuid.UUID, body: DecisionIn, principal: CurrentPrincipal, request: Request
+) -> StreamingResponse:
+    """Same decision as ``/approve`` (idempotent, hash-bound); the resumed run's real steps
+    (decision -> deterministic execution -> response) are streamed while they happen."""
+    return await _stream_decision(action_id, "approve", body, principal, request)
+
+
+@router.post(
+    "/agent/actions/{action_id}/reject/stream",
+    response_class=StreamingResponse,
+    responses=_STREAM_DOC,
+)
+async def reject_stream(
+    action_id: uuid.UUID, body: DecisionIn, principal: CurrentPrincipal, request: Request
+) -> StreamingResponse:
+    return await _stream_decision(action_id, "reject", body, principal, request)
 
 
 # --- AssistantError -> HTTP ---------------------------------------------------------------------

@@ -147,3 +147,37 @@ export type History = {
 };
 
 export type ApiError = { code: string; message: string; status: number | null };
+
+/** Live run events (backend/app/agent/events.py), streamed while a run executes. */
+export type RunEventType =
+  | "run_started"
+  | "step_started"
+  | "step_completed"
+  | "step_failed"
+  | "step_skipped"
+  | "approval_required"
+  | "approval_resolved"
+  | "run_completed"
+  | "run_failed";
+
+export type StepStatus = "running" | "completed" | "failed" | "rejected" | "waiting" | "skipped";
+
+export type Capability = { kind: TraceEventKind; label: string };
+
+export type RunEvent = {
+  type: RunEventType;
+  run_id: string;
+  sequence: number;
+  elapsed_ms: number;
+  step_id?: string;
+  kind?: TraceEventKind;
+  label?: string;
+  status?: StepStatus;
+  detail?: string;
+  metadata?: Record<string, string | number | boolean | null>;
+  duration_ms?: number;
+  capabilities?: Capability[];
+  next_steps?: Capability[];
+  response?: unknown;
+  error?: { code: string; message: string; status?: number };
+};
