@@ -1,6 +1,11 @@
-"""System prompt ``commerce-assistant-v3``: v2 (policy RAG) plus approval-gated actions.
+"""System prompt ``commerce-assistant-v4``: v2 (policy RAG) plus approval-gated actions and
+the citation-scope rules.
 
-Differences from v2 (graph RAG, Step 9; still used by ``RAG_PROFILE``):
+v4 = v3 + ``CITATION_SCOPE_RULES``: a policy citation only for a string search_policy_knowledge
+returned in the current request; commerce-only answers carry no citation (some hosted models
+decorated commerce answers with invented ``policy://`` citations, which grounding rejects).
+
+Differences of v3 from v2 (graph RAG, Step 9; v2 is still used by ``RAG_PROFILE``):
 
 * adds ``propose_cancel_order`` / ``propose_store_credit``: the model may only PROPOSE; a
   human approves before anything changes, and the model must never claim an action ran;
@@ -16,7 +21,16 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from app.agent.prompts import graph_rag as v2
 
 PROMPT_ID = "commerce_assistant"
-PROMPT_VERSION = "commerce-assistant-v3"
+PROMPT_VERSION = "commerce-assistant-v4"
+
+CITATION_SCOPE_RULES = """\
+
+Citations (scope)
+- Add a policy:// citation only when search_policy_knowledge returned that exact citation
+  string during the current request.
+- Answers based only on commerce tool results (customers, orders, invoices, shipments,
+  products) contain no policy citation. Never add a citation to show where a commerce fact
+  came from."""
 
 ACTION_RULES = """\
 
@@ -33,7 +47,9 @@ Actions (approval required)
 - Propose at most one action per request, in its own step. Commerce tools come first,
   then policy search, then the proposal."""
 
-SYSTEM_PROMPT = v2.SYSTEM_PROMPT.replace("\n\nGeneral\n", ACTION_RULES + "\n\nGeneral\n")
+SYSTEM_PROMPT = v2.SYSTEM_PROMPT.replace(
+    "\n\nGeneral\n", ACTION_RULES + CITATION_SCOPE_RULES + "\n\nGeneral\n"
+)
 assert SYSTEM_PROMPT != v2.SYSTEM_PROMPT  # noqa: S101 - import-time guard on the splice
 
 

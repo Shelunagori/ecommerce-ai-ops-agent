@@ -38,7 +38,7 @@ export function response(over: Partial<AgentResponse> = {}): AgentResponse {
   return {
     thread_id: "t-1",
     answer: "Done.",
-    prompt_version: "commerce-assistant-v3",
+    prompt_version: "commerce-assistant-v4",
     model_calls: 2,
     duration_ms: 12,
     tool_calls: [],

@@ -15,7 +15,7 @@ from collections.abc import Callable
 from datetime import date
 from typing import Any, Protocol
 
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.runtime import Runtime
@@ -50,6 +50,7 @@ from app.agent.trace import (
     PROPOSAL_LABEL,
     RETRIEVAL_LABEL,
     TraceEventKind,
+    citation_correction_step,
     decision_step,
     execution_step,
     grounding_step,
@@ -67,6 +68,15 @@ logger = logging.getLogger("app.agent.graph")
 THREAD_SCOPE_MESSAGE = "This conversation thread belongs to a different account."
 ARTIFACT_KEY = "policy_citations"  # ToolMessage.artifact: kept in history, never sent to models
 ACTION_NAMES = frozenset(ACTION_TOOLS)
+# An answer that cites policy although no policy retrieval ran in this request gets ONE
+# corrective model call (see GraphNodes.model); everything else fails closed as before.
+CORRECTABLE_CITATION_ISSUES = frozenset({"citation_not_retrieved", "stale_citation"})
+CITATION_CORRECTION_NOTE = (
+    "Application check: your previous answer cited a policy source that was not returned by "
+    "search_policy_knowledge in this request, so it was not shown. Answer again. If the "
+    "answer is based only on commerce tool results, include no policy:// citation. If the "
+    "question needs company policy, call search_policy_knowledge first."
+)
 _STATUS_RANK = {"none": 0, "invalid": 1, "no_results": 2, "success": 3}
 
 
@@ -149,81 +159,117 @@ class GraphNodes:
         update: dict[str, Any] = {} if bound is not None else {"scope_digest": expected}
 
         round_no = state.get("model_calls", 0) + 1
-        update["model_calls"] = round_no
         prompt = self._profile.prompt
         events = current_emitter()
-        provider = self._provider.info.provider
-        step = events.start(
-            TraceEventKind.MODEL,
-            MODEL_LABEL,
-            "Deciding the next step",
-            call=round_no,
-            provider=provider,
-        )
-        try:
-            chat = self._provider.invoke_chat(
-                state["messages"],
-                tools=self._bound,
-                operation=prompt.PROMPT_ID,
-                prompt_version=prompt.PROMPT_VERSION,
-            )
-        except LLMError as exc:
-            events.fail(
-                step,
+        status = state.get("policy_retrieval_status", "none")
+        providers = list(state.get("model_providers", []))
+        corrections = list(state.get("citation_corrections", []))
+        # Transient messages for ONE corrective call (never checkpointed, see below).
+        extra: list[BaseMessage] = []
+        while True:
+            update["model_calls"] = round_no
+            provider = self._provider.info.provider
+            step = events.start(
                 TraceEventKind.MODEL,
                 MODEL_LABEL,
-                f"Model provider call failed ({exc.code})",
+                "Deciding the next step",
                 call=round_no,
                 provider=provider,
             )
-            return {**update, "pending": None, "error": _error(exc.code, "llm", exc.message)}
-        ai: AIMessage = chat.message  # the provider's original message, never rebuilt
-        # The provider that ACTUALLY answered this call (a fallback may have served it).
-        provider = chat.provider or provider
-        fallback_used = bool(chat.fallback_used)
-        update["model_providers"] = [
-            *state.get("model_providers", []),
-            {"round": round_no, "provider": provider, "fallback_used": fallback_used},
-        ]
+            try:
+                chat = self._provider.invoke_chat(
+                    [*state["messages"], *extra],
+                    tools=self._bound,
+                    operation=prompt.PROMPT_ID,
+                    prompt_version=prompt.PROMPT_VERSION,
+                )
+            except LLMError as exc:
+                events.fail(
+                    step,
+                    TraceEventKind.MODEL,
+                    MODEL_LABEL,
+                    f"Model provider call failed ({exc.code})",
+                    call=round_no,
+                    provider=provider,
+                )
+                return {**update, "pending": None, "error": _error(exc.code, "llm", exc.message)}
+            ai: AIMessage = chat.message  # the provider's original message, never rebuilt
+            # The provider that ACTUALLY answered this call (a fallback may have served it).
+            provider = chat.provider or provider
+            fallback_used = bool(chat.fallback_used)
+            providers.append(
+                {"round": round_no, "provider": provider, "fallback_used": fallback_used}
+            )
+            update["model_providers"] = list(providers)
 
-        status = state.get("policy_retrieval_status", "none")
-        decision = evaluate_model_turn(
-            ai,
-            round_no=round_no,
-            seen_call_ids=state.get("seen_tool_call_ids", []),
-            # every capability call counts: commerce + policy retrieval (incl. invalid ones)
-            tool_calls_so_far=len(state.get("tool_calls", []))
-            + len(state.get("retrievals", []))
-            + len(state.get("action_calls", [])),
-            limits=self._limits,
-            retrieval_name=SEARCH_POLICY_KNOWLEDGE if self._profile.policy_knowledge else None,
-            retrieval_done=status in ("success", "no_results"),
-            action_names=ACTION_NAMES if self._profile.actions else frozenset(),
-            action_attempts=len(state.get("action_calls", [])),
-        )
-        if decision.kind in ("tools", "retrieve", "action"):
-            names = (
-                [safe_name(c.get("name")) or "<invalid>" for c in ai.tool_calls]
-                if decision.kind == "tools"
-                else []
+            decision = evaluate_model_turn(
+                ai,
+                round_no=round_no,
+                seen_call_ids=state.get("seen_tool_call_ids", []),
+                # every capability call counts: commerce + policy retrieval (incl. invalid)
+                tool_calls_so_far=len(state.get("tool_calls", []))
+                + len(state.get("retrievals", []))
+                + len(state.get("action_calls", [])),
+                limits=self._limits,
+                retrieval_name=SEARCH_POLICY_KNOWLEDGE if self._profile.policy_knowledge else None,
+                retrieval_done=status in ("success", "no_results"),
+                action_names=ACTION_NAMES if self._profile.actions else frozenset(),
+                action_attempts=len(state.get("action_calls", [])),
             )
-            detail = model_detail(
-                names,
-                retrieval=decision.kind == "retrieve",
-                proposal=decision.kind == "action",
-                final=False,
-            )
-            events.finish(step, model_step(round_no, provider, detail, fallback_used=fallback_used))
-            seen = [*state.get("seen_tool_call_ids", []), *decision.new_call_ids]
-            kind = {"retrieve": "retrieval", "action": "action"}.get(decision.kind, "commerce")
-            return {**update, "pending": ai, "pending_kind": kind, "seen_tool_call_ids": seen}
-        if decision.kind == "answer":
+            if decision.kind in ("tools", "retrieve", "action"):
+                names = (
+                    [safe_name(c.get("name")) or "<invalid>" for c in ai.tool_calls]
+                    if decision.kind == "tools"
+                    else []
+                )
+                detail = model_detail(
+                    names,
+                    retrieval=decision.kind == "retrieve",
+                    proposal=decision.kind == "action",
+                    final=False,
+                )
+                events.finish(
+                    step, model_step(round_no, provider, detail, fallback_used=fallback_used)
+                )
+                seen = [*state.get("seen_tool_call_ids", []), *decision.new_call_ids]
+                kind = {"retrieve": "retrieval", "action": "action"}.get(decision.kind, "commerce")
+                return {**update, "pending": ai, "pending_kind": kind, "seen_tool_call_ids": seen}
+            if decision.kind != "answer":
+                break
+            grounding = None
+            if self._profile.policy_knowledge:
+                sources = {s["citation"]: s for s in state.get("policy_sources", [])}
+                grounding = check_grounding(
+                    decision.answer or "",
+                    status=status,  # type: ignore[arg-type]
+                    current=sources,
+                    earlier=earlier_policy_citations(state["messages"]),
+                )
+                if self._citation_correction_allowed(grounding, status, corrections, round_no):
+                    # No policy retrieval ran in this request, yet the answer cites a policy
+                    # source: it is rejected (never shown, never kept) and the model gets ONE
+                    # corrective call with the same history plus a note. A second invented
+                    # citation fails closed below. RAG runs never take this path.
+                    events.finish(
+                        step,
+                        model_step(
+                            round_no,
+                            provider,
+                            model_detail([], retrieval=False, proposal=False, corrected=True),
+                            fallback_used=fallback_used,
+                        ),
+                    )
+                    events.finish(None, citation_correction_step(str(grounding.detail)))
+                    corrections.append({"round": round_no, "detail": grounding.detail})
+                    update["citation_corrections"] = list(corrections)
+                    extra = [ai, HumanMessage(content=CITATION_CORRECTION_NOTE)]
+                    round_no += 1
+                    continue
             final_detail = model_detail([], retrieval=False, proposal=False, final=True)
             events.finish(
                 step, model_step(round_no, provider, final_detail, fallback_used=fallback_used)
             )
-            if self._profile.policy_knowledge:
-                sources = {s["citation"]: s for s in state.get("policy_sources", [])}
+            if grounding is not None:
                 # Reported only where the final trace reports it: after policy retrieval (or
                 # when validation actually rejects the answer).
                 reported = status in ("success", "no_results")
@@ -235,12 +281,6 @@ class GraphNodes:
                     )
                     if reported
                     else None
-                )
-                grounding = check_grounding(
-                    decision.answer or "",
-                    status=status,  # type: ignore[arg-type]
-                    current=sources,
-                    earlier=earlier_policy_citations(state["messages"]),
                 )
                 if not grounding.ok:
                     events.fail(
@@ -278,6 +318,19 @@ class GraphNodes:
             "invalid_tool_calls": invalid,
             "error": _error(decision.error_code or "agent_protocol_error", decision.error_detail),
         }
+
+    def _citation_correction_allowed(
+        self, grounding: Any, status: str, corrections: list[dict[str, Any]], round_no: int
+    ) -> bool:
+        """Only for an answer that cites a policy source although NO policy retrieval ran in
+        this request (catalog empty), once per run, and only within the round limit."""
+        return (
+            not grounding.ok
+            and status == "none"
+            and grounding.detail in CORRECTABLE_CITATION_ISSUES
+            and not corrections
+            and round_no < self._limits.max_model_rounds
+        )
 
     # --- TOOLS ------------------------------------------------------------------------------
     def tools(self, state: CommerceGraphState, runtime: Runtime[AgentContext]) -> dict[str, Any]:

@@ -106,7 +106,8 @@ def _stale(case):
     def reuse_old(messages):
         return _cite(_last_policy_citations(messages)[0])
 
-    return [*first, reuse_old]
+    # the one corrective call (no retrieval in this request) reuses the old citation again
+    return [*first, reuse_old, reuse_old]
 
 
 def _memory_after_invalid(case):
@@ -119,7 +120,9 @@ def _obey_injection(case):
 
 
 def _cite_without_retrieval(case):
-    return [_cite("policy://delayed-shipment-compensation/v2#chunk-2")]
+    # cited again after the one corrective call -> still fails closed
+    cited = "policy://delayed-shipment-compensation/v2#chunk-2"
+    return [_cite(cited), _cite(cited)]
 
 
 # (name, case id, script factory, expected (code, detail))

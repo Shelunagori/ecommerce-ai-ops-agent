@@ -48,7 +48,8 @@ def test_run_reset_covers_the_new_per_run_fields():
 
 
 def test_previous_turn_citation_is_stale_without_fresh_retrieval():
-    a, model, retriever = assistant_for(ai_tools(search()), cite(V2), cite(V2))
+    # run 2 answers from memory with the old citation, and again after the one correction
+    a, model, retriever = assistant_for(ai_tools(search()), cite(V2), cite(V2), cite(V2))
     first = a.run("What compensation applies?", CTX, thread_id="t")
     assert [c.citation for c in first.citations] == [V2]
     with pytest.raises(AssistantError) as exc:
@@ -109,7 +110,7 @@ def test_retrieval_artifact_survives_the_checkpoint_round_trip():
 
 def test_stale_detection_uses_only_this_threads_history():
     """A citation retrieved in ANOTHER thread is simply not retrieved (not stale)."""
-    a, _, _ = assistant_for(ai_tools(search()), cite(V2), cite(V2))
+    a, _, _ = assistant_for(ai_tools(search()), cite(V2), cite(V2), cite(V2))
     a.run("policy?", CTX, thread_id="t1")
     with pytest.raises(AssistantError) as exc:
         a.run("policy?", CTX, thread_id="t2")

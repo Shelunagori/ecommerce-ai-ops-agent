@@ -172,7 +172,7 @@ def test_runs_are_recorded_without_content(committed, svc, ns):
     )
     assert run.request_id == "req-obs-1" and run.thread_key.startswith("cg1-")
     assert run.action_request_id == resume.action_request_id == uuid.UUID(pending.id)
-    assert (run.profile, run.prompt_version) == ("agent", "commerce-assistant-v3")
+    assert (run.profile, run.prompt_version) == ("agent", "commerce-assistant-v4")
     with committed() as s:
         raw = json.dumps([list(map(str, r)) for r in s.execute(select(AgentRun.__table__)).all()])
     assert "PRIVATE" not in raw and str(ns.tenant_id) in raw  # tenant column only
@@ -181,7 +181,10 @@ def test_runs_are_recorded_without_content(committed, svc, ns):
 def test_grounding_failures_are_countable(committed, svc, ns):
     from app.agent.assistant import AssistantError
 
-    a = agent(committed, svc, ai_text("See [policy://made-up/v1#chunk-1]"))
+    # An unretrieved citation without any retrieval gets ONE corrective call; the model
+    # repeats it, so the run still fails closed and is counted as a grounding failure.
+    bad = "See [policy://made-up/v1#chunk-1]"
+    a = agent(committed, svc, ai_text(bad), ai_text(bad))
     with pytest.raises(AssistantError):
         a.run("policy?", ns, thread_id="t")
     [run] = runs(committed)

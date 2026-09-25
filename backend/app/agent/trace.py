@@ -114,7 +114,18 @@ def request_step(*, public_demo: bool = False) -> TraceStep:
     return TraceStep.of(TraceEventKind.REQUEST, "Request received", detail=detail)
 
 
-def model_detail(tool_names: Iterable[str], *, retrieval: bool, proposal: bool, final: bool) -> str:
+def model_detail(
+    tool_names: Iterable[str],
+    *,
+    retrieval: bool,
+    proposal: bool,
+    final: bool = False,
+    corrected: bool = False,
+) -> str:
+    """``corrected``: the answer of this call cited an unretrieved policy source and was
+    rejected by the citation check (the model then answered again)."""
+    if corrected:
+        return "Answer rejected: it cited a policy source that was not retrieved"
     names = ", ".join(dict.fromkeys(tool_names))
     if names:
         return f"Requested commerce tool: {names}"
@@ -213,6 +224,22 @@ def grounding_step(cited: int) -> TraceStep:
         GROUNDING_LABEL,
         detail=f"{cited} citation{'s' if cited != 1 else ''} checked against this run",
         citations_verified=cited,
+    )
+
+
+CITATION_CHECK_LABEL = "Citation check"
+
+
+def citation_correction_step(issue: str) -> TraceStep:
+    """A model answer cited a policy source although no policy retrieval ran in this
+    request; it was not shown and the model was asked once to answer again. ``rejected``,
+    not ``failed``: the run continues (a second occurrence fails closed as grounding)."""
+    return TraceStep.of(
+        TraceEventKind.GROUNDING,
+        CITATION_CHECK_LABEL,
+        TraceStatus.REJECTED,
+        detail="Answer cited a policy source that was not retrieved; asked to answer again",
+        citation_issue=issue,
     )
 
 
@@ -345,6 +372,7 @@ def build_execution_trace(
     proposals = values.get("action_calls", [])
     model_calls = int(values.get("model_calls", 0))
     served = {int(m.get("round", 0)): m for m in values.get("model_providers", [])}
+    corrected = {int(c.get("round", 0)): c for c in values.get("citation_corrections", [])}
 
     trace.add(request_step(public_demo=public_demo))
     for round_no in range(1, model_calls + 1):
@@ -357,6 +385,7 @@ def build_execution_trace(
             retrieval=bool(r_retrievals),
             proposal=bool(r_proposals),
             final=final,
+            corrected=round_no in corrected,
         )
         call = served.get(round_no, {})
         trace.add(
@@ -367,6 +396,8 @@ def build_execution_trace(
                 fallback_used=bool(call.get("fallback_used")),
             )
         )
+        if round_no in corrected:
+            trace.add(citation_correction_step(str(corrected[round_no].get("detail"))))
         for t in r_tools:
             trace.add(tool_step(t))
         for r in r_retrievals:

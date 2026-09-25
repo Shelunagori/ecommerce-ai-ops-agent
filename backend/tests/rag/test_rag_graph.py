@@ -437,9 +437,11 @@ def test_citation_never_retrieved_is_rejected(db, bad):
 
 
 def test_answer_without_retrieval_may_not_cite(db):
-    assistant, _, _ = build(db, cite(V2))
+    """No retrieval in this request: one corrective model call, then fail closed."""
+    assistant, model, _ = build(db, cite(V2), cite(V2))
     err = fail(assistant)
     assert (err.code, err.detail) == ("agent_grounding_error", "citation_not_retrieved")
+    assert len(model.invocations) == 2
 
 
 # --- retrieval failures are not "no results" -------------------------------------------------

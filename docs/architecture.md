@@ -1223,6 +1223,23 @@ Embeddings (RETRIEVE) ─────▶ unchanged embedding profile (Gemini) �
   < limit` before the run, given back if the run fails. Durable across restarts/replicas,
   no Redis. Reviewer accounts are never budgeted. Exhausted → 429 `public_demo_limit_reached`.
 
+## Grounding routing: commerce facts vs policy knowledge
+
+* Deterministic commerce facts (tool results from PostgreSQL) never need a policy citation;
+  policy grounding (`check_grounding`) never REQUIRES a citation unless policy retrieval
+  succeeded in this request. Its "no unretrieved citation" rule still checks every answer.
+* Production regression (Cloudflare Workers AI): the model wrote an invented `policy://`
+  citation into a commerce-only answer ("Where is SHP-1003?"), which that rule rejected.
+* Fix: prompt `commerce-assistant-v4` / `-v4-public-demo` adds "Citations (scope)" (cite only
+  strings search_policy_knowledge returned in this request; commerce-only answers carry no
+  citation). And when NO policy retrieval ran in the request and an answer cites policy
+  (`citation_not_retrieved` / `stale_citation`), the MODEL node rejects that answer (never
+  shown, never kept in history) and makes ONE corrective call with the same history plus an
+  application note, within `max_model_rounds`; a repeat fails closed as before. Recorded in
+  per-run state `citation_corrections` → trace step "Citation check" (`rejected`, metadata
+  `citation_issue`). RAG runs (retrieval success / no_results / invalid) never get a second
+  chance: every existing grounding rule fails closed unchanged. Tools are not re-run.
+
 ## Open items
 
 Known follow-ups are tracked in [pending-items.md](pending-items.md).

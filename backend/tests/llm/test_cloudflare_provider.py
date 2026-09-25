@@ -97,7 +97,7 @@ def chat(p: ChatModelProvider, messages=None, tools=TOOLS):
         messages or [SystemMessage("You are a commerce assistant."), HumanMessage("Hi")],
         tools=tools,
         operation="commerce_assistant",
-        prompt_version="commerce-assistant-v3",
+        prompt_version="commerce-assistant-v4",
     )
 
 

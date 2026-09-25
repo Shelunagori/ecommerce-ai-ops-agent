@@ -530,3 +530,23 @@ migrated.
   (frontend badges/messages), live trace L1–L15, security X1–X14.
 - **Manual / not verified here:** a live Cloudflare call (no credentials in the sandbox; opt-in
   tests provided, P30); Railway variables.
+
+## Grounding routing fix (commerce-only answers with an invented citation)
+
+- **Root cause:** not a routing bug. With no retrieval, grounding requires no citation, but it
+  rejects any `policy://` citation that was not retrieved in the request. The Cloudflare model
+  (Llama 4 Scout) appended an invented citation to the shipment answer (reproduced exactly:
+  same live trace, `agent_grounding_error` / `citation_not_retrieved`).
+- **Fix (chosen by the user: prompt + one retry):** prompt v4 citation-scope rule; one
+  corrective model call only when no retrieval ran in the request; RAG unchanged.
+- **Tests:** `tests/db/test_commerce_grounding_routing.py` (18; 9 red before the fix, 9 RAG
+  fail-closed guards green before and after). Updated deliberately (one corrective call now
+  consumes one more scripted answer; codes unchanged): `test_rag_graph::
+  test_answer_without_retrieval_may_not_cite`, `test_rag_checkpoint` (2), `test_rag_eval`
+  adversaries `stale_previous_turn` / `cite_without_retrieval`, `test_observability::
+  test_grounding_failures_are_countable`; prompt version v3 → v4 in `test_agent_api`,
+  `test_hitl_graph`, `test_observability`.
+- **Results:** backend **1497 passed, 24 skipped** (before: 1479/24), no-DB 839; frontend 85;
+  Playwright 20/20; ruff/format/eslint/tsc clean. Mutations G1–G6 red (G1 = correction
+  over-applied to RAG runs → 3 RAG guards red).
+

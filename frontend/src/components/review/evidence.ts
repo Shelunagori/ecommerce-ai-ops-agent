@@ -6,7 +6,7 @@
 export const EVIDENCE_AS_OF = "2026-09-25";
 
 export const EVIDENCE: { label: string; value: string; note: string }[] = [
-  { label: "Backend tests", value: "1,479 passed", note: "pytest on real PostgreSQL + pgvector; 24 opt-in live-model tests skipped" },
+  { label: "Backend tests", value: "1,497 passed", note: "pytest on real PostgreSQL + pgvector; 24 opt-in live-model tests skipped" },
   { label: "Frontend unit tests", value: "85 passed", note: "Vitest + Testing Library: live trace, SSE parser, provider badges, auth landing, chat, approvals, /review" },
   { label: "Browser end-to-end", value: "20 passed", note: "Playwright: real UI → real API → PostgreSQL, deterministic model, live trace transitions; dev and production builds" },
   {
