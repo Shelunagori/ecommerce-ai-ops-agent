@@ -27,6 +27,8 @@ RUN_RESET: dict[str, Any] = {
     "model_providers": [],
     # Answers rejected by the citation check and answered again ({round, detail}); max one.
     "citation_corrections": [],
+    # Commerce + policy batches rejected before execution and re-asked ({round, detail}); max one.
+    "capability_corrections": [],
     "tool_calls": [],
     "invalid_tool_calls": [],
     "seen_tool_call_ids": [],
@@ -99,6 +101,9 @@ class CommerceGraphState(TypedDict, total=False):
     # {"round", "detail"}: an answer citing an unretrieved policy source when NO retrieval
     # ran in this request; the model was asked once to answer again (GraphNodes.model).
     citation_corrections: list[dict[str, Any]]
+    # {"round", "detail"}: a model turn that requested commerce tools AND policy retrieval
+    # together; nothing of it ran and the model was asked once to choose one capability.
+    capability_corrections: list[dict[str, Any]]
     # Plain dicts (ToolCallSummary / InvalidToolCallSummary .model_dump()) so checkpoints
     # hold only JSON primitives, not application classes.
     tool_calls: list[dict[str, Any]]

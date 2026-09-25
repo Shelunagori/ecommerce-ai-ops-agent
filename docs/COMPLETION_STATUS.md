@@ -575,3 +575,24 @@ migrated.
 - **Results:** backend **1526 passed, 25 skipped** (before: 1497/24); ruff/format clean;
   Playwright live + agent specs 12/12. Pending: P33 (confirm the live shape).
 
+## Capability sequencing (GLM 4.7 Flash `mixed_capability_batch`)
+
+- **Reverted first:** the uncommitted model-name-validation hardening (config.py, its tests
+  and docs); the exact GLM id was already accepted by the old validator.
+- **Root cause (reproduced offline, same log shape as production):** GLM returned
+  get_shipment + search_policy_knowledge in ONE turn although the v2 prompt already says
+  "separate steps"; the graph's guard rejected the batch (nothing ran) and the run failed.
+- **Fix (user choices: commerce + policy only; tighten prompt + bump v5):** prompt v5 rule
+  "One capability per step"; ONE corrective model call for a rejected pure commerce + policy
+  batch (same provider, same history + note; rejected batch not re-sent or kept); a second
+  mix fails closed; mixes with action proposals stay fail-closed; guard unchanged.
+- **Tests:** `tests/db/test_capability_sequencing.py` (17; 13 red before the fix, 4 scope
+  guards green before and after). Updated deliberately: prompt version v4 → v5 in
+  `test_agent_api`, `test_hitl_graph`, `test_observability`, `test_commerce_grounding_routing`;
+  `test_rag_graph::test_mixed_capability_batch_executes_nothing` now scripts a second mixed
+  batch (still fails closed, nothing executed, 2 model calls). Mutations N1–N7 red (no
+  correction 9, unlimited 4, action mixes corrected 3, rejected batch re-sent 1, kept in
+  history 1, round limit ignored 1, guard removed 11).
+- **Results:** backend **1543 passed, 25 skipped** (before: 1526/25); frontend 85;
+  Playwright live + agent 12/12; ruff/format clean. Pending: P34 (live verification).
+

@@ -467,4 +467,4 @@ def test_agent_profile_requires_a_checkpointer(tools, svc):
 def test_agent_profile_binds_the_proposal_capabilities(tools, svc):
     a, _ = agent(tools, svc)
     assert a.bound_tool_names[-2:] == (PROPOSE_CANCEL_ORDER, PROPOSE_STORE_CREDIT)
-    assert a.profile.prompt_version == "commerce-assistant-v4"
+    assert a.profile.prompt_version == "commerce-assistant-v5"

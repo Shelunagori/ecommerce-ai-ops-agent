@@ -348,8 +348,8 @@ def test_stream_and_json_agree_for_the_corrected_commerce_answer(rig, tenant_a):
 
 # --- prompt: the scope rule ships in both production prompts, v2 (RAG baseline) unchanged ------
 def test_citation_scope_rule_is_in_the_production_prompts_only():
-    assert graph_agent.PROMPT_VERSION == "commerce-assistant-v4"
-    assert graph_demo.PROMPT_VERSION == "commerce-assistant-v4-public-demo"
+    assert graph_agent.PROMPT_VERSION == "commerce-assistant-v5"
+    assert graph_demo.PROMPT_VERSION == "commerce-assistant-v5-public-demo"
     for prompt in (graph_agent.SYSTEM_PROMPT, graph_demo.SYSTEM_PROMPT):
         assert "Citations (scope)" in prompt and "contain no policy citation" in prompt
     assert "Citations (scope)" not in graph_rag.SYSTEM_PROMPT

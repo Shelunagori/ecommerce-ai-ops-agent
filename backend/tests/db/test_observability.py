@@ -172,7 +172,7 @@ def test_runs_are_recorded_without_content(committed, svc, ns):
     )
     assert run.request_id == "req-obs-1" and run.thread_key.startswith("cg1-")
     assert run.action_request_id == resume.action_request_id == uuid.UUID(pending.id)
-    assert (run.profile, run.prompt_version) == ("agent", "commerce-assistant-v4")
+    assert (run.profile, run.prompt_version) == ("agent", "commerce-assistant-v5")
     with committed() as s:
         raw = json.dumps([list(map(str, r)) for r in s.execute(select(AgentRun.__table__)).all()])
     assert "PRIVATE" not in raw and str(ns.tenant_id) in raw  # tenant column only

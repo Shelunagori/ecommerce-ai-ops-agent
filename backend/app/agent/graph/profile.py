@@ -1,10 +1,10 @@
 """Graph behaviour profiles. ONE graph implementation; the profile only selects the prompt
 and whether the policy-knowledge capability (RETRIEVE node + grounding) is enabled.
 
-* ``AGENT_PROFILE`` - production entry points (API, CLI): ``commerce-assistant-v4`` +
+* ``AGENT_PROFILE`` - production entry points (API, CLI): ``commerce-assistant-v5`` +
   policy RAG + approval-gated actions (requires a checkpointer).
 * ``PUBLIC_DEMO_PROFILE`` - public "Try Live Demo" (anonymous visitors): policy RAG, NO
-  action capability (``commerce-assistant-v4-public-demo``); read-only by construction.
+  action capability (``commerce-assistant-v5-public-demo``); read-only by construction.
 * ``RAG_PROFILE`` - class default (Step 9): ``commerce-assistant-v2`` + policy RAG.
 * ``STEP5_PARITY_PROFILE`` - TEST-ORIENTED compatibility mode: ``commerce-assistant-v1``,
   no policy capability, no grounding. It exists so the Step-5 manual loop can be compared

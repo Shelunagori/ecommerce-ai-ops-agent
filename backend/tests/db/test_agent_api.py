@@ -131,7 +131,7 @@ def test_chat_request_returns_the_application_contract(h, tenant_a):
     assert (
         body["answer"] == "ORD-1001 was delivered." and body["tool_calls"][0]["tool"] == "get_order"
     )
-    assert body["prompt_version"] == "commerce-assistant-v4" and body["action"] is None
+    assert body["prompt_version"] == "commerce-assistant-v5" and body["action"] is None
     raw = r.text
     assert str(tenant_a.tenant_id) not in raw and graph_agent.SYSTEM_PROMPT[:40] not in raw
     assert '"data"' not in raw  # no raw tool payloads

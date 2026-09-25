@@ -121,11 +121,15 @@ def model_detail(
     proposal: bool,
     final: bool = False,
     corrected: bool = False,
+    sequencing: bool = False,
 ) -> str:
     """``corrected``: the answer of this call cited an unretrieved policy source and was
-    rejected by the citation check (the model then answered again)."""
+    rejected by the citation check (the model then answered again). ``sequencing``: this call
+    requested commerce tools and policy retrieval together; nothing of it ran."""
     if corrected:
         return "Answer rejected: it cited a policy source that was not retrieved"
+    if sequencing:
+        return "Requested commerce tools and policy retrieval together; nothing was run"
     names = ", ".join(dict.fromkeys(tool_names))
     if names:
         return f"Requested commerce tool: {names}"
@@ -240,6 +244,22 @@ def citation_correction_step(issue: str) -> TraceStep:
         TraceStatus.REJECTED,
         detail="Answer cited a policy source that was not retrieved; asked to answer again",
         citation_issue=issue,
+    )
+
+
+CAPABILITY_SEQUENCING_LABEL = "Capability sequencing"
+
+
+def capability_correction_step(issue: str) -> TraceStep:
+    """A model turn requested commerce tools and policy retrieval together. Nothing of it
+    ran and the model was asked once to choose one capability. ``rejected``, not ``failed``:
+    the run continues (a second mixed batch fails the run as a protocol error)."""
+    return TraceStep.of(
+        TraceEventKind.MODEL,
+        CAPABILITY_SEQUENCING_LABEL,
+        TraceStatus.REJECTED,
+        detail="Mixed capability batch rejected; retrying with one capability",
+        protocol_issue=issue,
     )
 
 
@@ -373,6 +393,7 @@ def build_execution_trace(
     model_calls = int(values.get("model_calls", 0))
     served = {int(m.get("round", 0)): m for m in values.get("model_providers", [])}
     corrected = {int(c.get("round", 0)): c for c in values.get("citation_corrections", [])}
+    resequenced = {int(c.get("round", 0)): c for c in values.get("capability_corrections", [])}
 
     trace.add(request_step(public_demo=public_demo))
     for round_no in range(1, model_calls + 1):
@@ -386,6 +407,7 @@ def build_execution_trace(
             proposal=bool(r_proposals),
             final=final,
             corrected=round_no in corrected,
+            sequencing=round_no in resequenced,
         )
         call = served.get(round_no, {})
         trace.add(
@@ -398,6 +420,8 @@ def build_execution_trace(
         )
         if round_no in corrected:
             trace.add(citation_correction_step(str(corrected[round_no].get("detail"))))
+        if round_no in resequenced:
+            trace.add(capability_correction_step(str(resequenced[round_no].get("detail"))))
         for t in r_tools:
             trace.add(tool_step(t))
         for r in r_retrievals:

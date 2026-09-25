@@ -550,6 +550,8 @@ class CommerceGraphAssistant:
             "tool_call_count": len(tool_calls),
             "tool_names": [c.get("tool") for c in tool_calls],
             "invalid_tool_calls": len(values.get("invalid_tool_calls", [])),
+            # commerce + policy batches rejected before execution and re-asked (max one)
+            "capability_corrections": len(values.get("capability_corrections", [])),
             "graph_steps": model_calls
             + len({c.get("round") for c in tool_calls})
             + len(retrievals),

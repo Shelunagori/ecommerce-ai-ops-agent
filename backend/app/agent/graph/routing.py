@@ -39,6 +39,9 @@ class TurnDecision:
     error_detail: str | None = None
     invalid_calls: tuple[InvalidToolCallSummary, ...] = ()
     new_call_ids: tuple[str, ...] = field(default=())
+    # Rejected batch that asked for commerce tools AND policy retrieval together: nothing of it
+    # executed, so the MODEL node may ask the model ONCE to choose one capability instead.
+    sequencing_correctable: bool = False
 
 
 def evaluate_model_turn(
@@ -97,8 +100,14 @@ def evaluate_model_turn(
         retrievals = [c for c in calls if retrieval_name and c.get("name") == retrieval_name]
         kind: Literal["tools", "retrieve", "action"] = "retrieve" if retrievals else "tools"
         if retrievals and len(retrievals) != len(calls):
-            # One AIMessage may not mix capability classes: execute nothing of it.
-            return _protocol("mixed_capability_batch")
+            # One AIMessage may not mix capability classes: execute nothing of it. Only a pure
+            # commerce + policy mix is correctable; any mix with an action proposal is not.
+            return TurnDecision(
+                kind="error",
+                error_code="agent_protocol_error",
+                error_detail="mixed_capability_batch",
+                sequencing_correctable=not any(c.get("name") in action_names for c in calls),
+            )
         if (
             kind == "tools"
             and retrieval_done

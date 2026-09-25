@@ -317,12 +317,15 @@ def test_smuggled_tenant_argument_is_rejected_not_used(db):
 
 # --- routing and budgets -----------------------------------------------------------------------
 def test_mixed_capability_batch_executes_nothing(db):
-    assistant, _, retriever = build(
-        db, ai_tools(call("get_shipment", shipment_number="SHP-1003"), search()), ai_text("never")
+    """Nothing of a mixed batch runs; after ONE corrective call a repeat fails closed."""
+    mixed = (call("get_shipment", shipment_number="SHP-1003"), search())
+    assistant, model, retriever = build(
+        db, ai_tools(*mixed), ai_tools(call("get_shipment", shipment_number="SHP-1003"), search())
     )
     err = fail(assistant)
     assert (err.code, err.detail) == ("agent_protocol_error", "mixed_capability_batch")
     assert retriever.calls == [] and db.sessions_opened == 0 and err.tool_calls == []
+    assert len(model.invocations) == 2
 
 
 def test_two_retrievals_in_one_turn_are_rejected(db):

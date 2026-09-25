@@ -50,6 +50,7 @@ from app.agent.trace import (
     PROPOSAL_LABEL,
     RETRIEVAL_LABEL,
     TraceEventKind,
+    capability_correction_step,
     citation_correction_step,
     decision_step,
     execution_step,
@@ -76,6 +77,16 @@ CITATION_CORRECTION_NOTE = (
     "search_policy_knowledge in this request, so it was not shown. Answer again. If the "
     "answer is based only on commerce tool results, include no policy:// citation. If the "
     "question needs company policy, call search_policy_knowledge first."
+)
+# A model turn that requests commerce tools AND policy retrieval together is rejected before
+# anything of it runs (routing: mixed_capability_batch). It gets ONE corrective call with this
+# note (never kept in history, the rejected batch is not re-sent); a repeat fails closed.
+CAPABILITY_CORRECTION_NOTE = (
+    "Application check: your previous response requested commerce tools and "
+    "search_policy_knowledge in the same step, so none of them was run. This assistant runs "
+    "one kind of capability per step. Choose exactly one next step: when the question needs "
+    "both, call the commerce tool first; search the policy in a later step, after its result "
+    "is available."
 )
 _STATUS_RANK = {"none": 0, "invalid": 1, "no_results": 2, "success": 3}
 
@@ -164,6 +175,7 @@ class GraphNodes:
         status = state.get("policy_retrieval_status", "none")
         providers = list(state.get("model_providers", []))
         corrections = list(state.get("citation_corrections", []))
+        resequenced = list(state.get("capability_corrections", []))
         # Transient messages for ONE corrective call (never checkpointed, see below).
         extra: list[BaseMessage] = []
         while True:
@@ -235,6 +247,26 @@ class GraphNodes:
                 kind = {"retrieve": "retrieval", "action": "action"}.get(decision.kind, "commerce")
                 return {**update, "pending": ai, "pending_kind": kind, "seen_tool_call_ids": seen}
             if decision.kind != "answer":
+                if self._sequencing_correction_allowed(decision, resequenced, round_no):
+                    # Commerce tools + policy retrieval in ONE turn: nothing of it ran (the
+                    # guard stays). The rejected batch is not kept or re-sent; the model gets
+                    # ONE corrective call with the same history plus a note. A second mixed
+                    # batch fails closed below with the same protocol error.
+                    events.finish(
+                        step,
+                        model_step(
+                            round_no,
+                            provider,
+                            model_detail([], retrieval=False, proposal=False, sequencing=True),
+                            fallback_used=fallback_used,
+                        ),
+                    )
+                    events.finish(None, capability_correction_step(str(decision.error_detail)))
+                    resequenced.append({"round": round_no, "detail": decision.error_detail})
+                    update["capability_corrections"] = list(resequenced)
+                    extra = [HumanMessage(content=CAPABILITY_CORRECTION_NOTE)]
+                    round_no += 1
+                    continue
                 break
             grounding = None
             if self._profile.policy_knowledge:
@@ -318,6 +350,17 @@ class GraphNodes:
             "invalid_tool_calls": invalid,
             "error": _error(decision.error_code or "agent_protocol_error", decision.error_detail),
         }
+
+    def _sequencing_correction_allowed(
+        self, decision: Any, resequenced: list[dict[str, Any]], round_no: int
+    ) -> bool:
+        """Only for a rejected commerce + policy batch (never one with an action proposal),
+        once per run, and only while a model round is left for the corrective call."""
+        return (
+            decision.sequencing_correctable
+            and not resequenced
+            and round_no < self._limits.max_model_rounds
+        )
 
     def _citation_correction_allowed(
         self, grounding: Any, status: str, corrections: list[dict[str, Any]], round_no: int

@@ -1,5 +1,8 @@
-"""System prompt ``commerce-assistant-v4``: v2 (policy RAG) plus approval-gated actions and
-the citation-scope rules.
+"""System prompt ``commerce-assistant-v5``: v2 (policy RAG) plus approval-gated actions, the
+citation-scope rules and the one-capability-per-step rule.
+
+v5 = v4 + ``CAPABILITY_RULES``: a step calls commerce tools OR one policy search, never both
+(some hosted models, e.g. GLM 4.7 Flash, batched both; the graph rejects such a batch).
 
 v4 = v3 + ``CITATION_SCOPE_RULES``: a policy citation only for a string search_policy_knowledge
 returned in the current request; commerce-only answers carry no citation (some hosted models
@@ -21,7 +24,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from app.agent.prompts import graph_rag as v2
 
 PROMPT_ID = "commerce_assistant"
-PROMPT_VERSION = "commerce-assistant-v4"
+PROMPT_VERSION = "commerce-assistant-v5"
 
 CITATION_SCOPE_RULES = """\
 
@@ -31,6 +34,13 @@ Citations (scope)
 - Answers based only on commerce tool results (customers, orders, invoices, shipments,
   products) contain no policy citation. Never add a citation to show where a commerce fact
   came from."""
+
+CAPABILITY_RULES = """\
+
+One capability per step
+- A step that calls tools calls either commerce tools or one search_policy_knowledge, never
+  both. For a question that needs both, call the commerce tool first and search the policy
+  in a later step, after its result is available."""
 
 ACTION_RULES = """\
 
@@ -48,7 +58,7 @@ Actions (approval required)
   then policy search, then the proposal."""
 
 SYSTEM_PROMPT = v2.SYSTEM_PROMPT.replace(
-    "\n\nGeneral\n", ACTION_RULES + CITATION_SCOPE_RULES + "\n\nGeneral\n"
+    "\n\nGeneral\n", ACTION_RULES + CITATION_SCOPE_RULES + CAPABILITY_RULES + "\n\nGeneral\n"
 )
 assert SYSTEM_PROMPT != v2.SYSTEM_PROMPT  # noqa: S101 - import-time guard on the splice
 

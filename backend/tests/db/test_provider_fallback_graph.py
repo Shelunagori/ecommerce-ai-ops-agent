@@ -51,9 +51,11 @@ def cf_text(text: str) -> httpx.Response:
 class Rig(Harness):
     """Agent API harness whose model is Cloudflare (mocked HTTP) with a Gemini fallback."""
 
-    def install(self, workers: Workers, *gemini_steps, profile=AGENT_PROFILE, fallback=True):
+    def install(
+        self, workers: Workers, *gemini_steps, profile=AGENT_PROFILE, fallback=True, **cf_over
+    ):
         cf = build_provider(
-            LLMConfig.from_settings(cf_settings()),
+            LLMConfig.from_settings(cf_settings(**cf_over)),
             http_client=httpx.Client(transport=httpx.MockTransport(workers)),
         )
         cf._sleep = lambda _s: None

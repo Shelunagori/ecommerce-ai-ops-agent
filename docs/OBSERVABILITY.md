@@ -15,7 +15,7 @@ chain-of-thought, retrieved policy text, vectors and secrets:
 | --- | --- |
 | `llm call` (one per provider call) | `provider`, `model`, `operation`, `prompt_version`, `outcome` (`ok` / `retrying` / `error`), `attempts`, `duration_ms`, `input_chars`, `error_code`, `error_type`; on a chat call that returned tool calls, `tool_calls` (count) and, for Cloudflare calls that needed a server-side correlation id, `tool_call_id_normalized` (count) — never ids, names or arguments |
 | `llm fallback` (primary failed for availability) | `provider`, `model`, `fallback_provider`, `fallback_model`, `operation`, `error_code` |
-| `graph assistant run` | … plus `model_providers` (provider that answered each model call, in order) and `fallback_calls` |
+| `graph assistant run` | … plus `model_providers` (provider that answered each model call, in order), `fallback_calls` and `capability_corrections` (commerce + policy batches rejected before execution and re-asked once) |
 
 The per-call provider also reaches the execution trace (`metadata.provider`,
 `metadata.fallback_used`). Never logged: messages, prompts, tool payloads, retrieved text,

@@ -1248,6 +1248,27 @@ Embeddings (RETRIEVE) ─────▶ unchanged embedding profile (Gemini) �
   `citation_issue`). RAG runs (retrieval success / no_results / invalid) never get a second
   chance: every existing grounding rule fails closed unchanged. Tools are not re-run.
 
+
+## Capability sequencing: one capability class per model turn
+
+* Invariant (unchanged): one AIMessage may not mix commerce tools and
+  `search_policy_knowledge` (`routing.py`, `mixed_capability_batch`); nothing of such a batch
+  executes. Commerce facts come first, policy text later, and once policy text is in context
+  no new commerce capability runs (`commerce_call_after_retrieval`).
+* Production regression (Cloudflare `@cf/zai-org/glm-4.7-flash`): the model batched
+  get_shipment + search_policy_knowledge for "Where is SHP-1003, and what compensation applies
+  if it is delayed?", so the run failed after one model call.
+* Fix: prompt `commerce-assistant-v5` / `-v5-public-demo` adds "One capability per step".
+  When a turn is rejected as a pure commerce + policy mix (`TurnDecision.
+  sequencing_correctable`; never a mix with an action proposal), the MODEL node makes ONE
+  corrective call to the same provider with the same history plus an application note (the
+  rejected batch is not re-sent and never enters history; its ids are not marked seen),
+  within `max_model_rounds`. A second mixed batch fails closed with the same
+  `agent_protocol_error` / `mixed_capability_batch`. Recorded in per-run state
+  `capability_corrections` → trace step "Capability sequencing" (MODEL kind, `rejected`,
+  metadata `protocol_issue`) in the live and final trace; the run log counts
+  `capability_corrections`. No provider fallback is involved.
+
 ## Open items
 
 Known follow-ups are tracked in [pending-items.md](pending-items.md).
