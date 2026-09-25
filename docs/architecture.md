@@ -1199,6 +1199,14 @@ Embeddings (RETRIEVE) ─────▶ unchanged embedding profile (Gemini) �
   are dropped for that request; the checkpointed history is unchanged, ids preserved).
   Gemini (langchain-google-genai 4.4) already accepts foreign turns by marking them with the
   documented `skip_thought_signature_validator` sentinel.
+* **Tool-call correlation ids** (provider layer only, `normalize_tool_call_ids`): Workers AI can
+  return a structured tool call (known name, JSON arguments) with a missing / null / empty
+  `id`. The Cloudflare adapter gives exactly those calls a server-side id `cf_call_<uuid4 hex>`
+  (used unchanged by the ToolMessage); a provider id is preserved verbatim. Never repaired:
+  duplicate provider ids, unparseable arguments (`invalid_tool_calls`), names, arguments,
+  text pseudo calls. The id is only a message link: tools, schema validation, tenant scope
+  and the graph's generic id check (`missing_id` / `duplicate_id`) are unchanged, and Gemini /
+  Ollama have no normaliser.
 * **Structured output.** Workers AI's JSON mode covers only some models, so for Cloudflare
   `invoke_structured` uses one forced tool call (`tool_choice="required"`) whose arguments are
   re-validated with the strict Pydantic schema (same `llm_output_invalid` on violation).

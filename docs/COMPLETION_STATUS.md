@@ -550,3 +550,28 @@ migrated.
   Playwright 20/20; ruff/format/eslint/tsc clean. Mutations G1–G6 red (G1 = correction
   over-applied to RAG runs → 3 RAG guards red).
 
+## Cloudflare tool-call id fix (`agent_protocol_error` / `tool_call_id`)
+
+- **Symptom:** "Where is SHP-1003, and what compensation applies if it is delayed?" → Cloudflare
+  HTTP 200, `llm call` outcome ok, then `invalid_tool_calls=1`, `tool_call_count=0`,
+  `agent_protocol_error` / `tool_call_id` after one model call; no fallback.
+- **Root cause (reproduced offline, not observed live — no credentials):** Workers AI returned
+  a STRUCTURED tool call without a usable `id` (missing / null / empty). LangChain parses it
+  into `tool_calls` with a falsy id; the graph's generic check refuses it (`missing_id`).
+  Ruled out by simulation: non-string id and object arguments (both fail inside the provider
+  call → outcome error), malformed JSON (→ `invalid_tool_calls`, different path), LangChain
+  losing a valid id (it passes ids verbatim).
+- **Fix:** Cloudflare-only `normalize_tool_call_ids` in `factory.py` via a new
+  `ChatModelProvider(normalize_response=…)` hook: `cf_call_<uuid4 hex>` for exactly the idless
+  calls; provider ids, duplicates, names, arguments and `invalid_tool_calls` untouched. The
+  graph, tools, validation, tenant scope, fallback rules, trace contract and frontend are
+  unchanged. `llm call` logs `tool_calls` / `tool_call_id_normalized` (counts only).
+- **Tests:** `tests/llm/test_cloudflare_tool_call_ids.py` (17) and
+  `tests/db/test_cloudflare_tool_call_ids_graph.py` (12) cover the 20 required cases; the
+  opt-in live test now asserts no `invalid_tool_calls`, a usable id and the round trip, and a
+  new opt-in test prints the raw tool-call STRUCTURE. Mutations: no normaliser (16 red),
+  overwrite valid ids (5), repair duplicates (2), normalise Gemini/Ollama (2), repair
+  `invalid_tool_calls` (4).
+- **Results:** backend **1526 passed, 25 skipped** (before: 1497/24); ruff/format clean;
+  Playwright live + agent specs 12/12. Pending: P33 (confirm the live shape).
+

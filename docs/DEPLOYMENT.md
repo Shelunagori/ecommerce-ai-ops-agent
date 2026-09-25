@@ -74,6 +74,11 @@ CLOUDFLARE_API_TOKEN=<SECRET: token with Workers AI Read>
 CLOUDFLARE_MODEL=@cf/meta/llama-4-scout-17b-16e-instruct
 GEMINI_API_KEY=<SECRET: existing key — fallback chat + embeddings>
 
+* **Tool-call ids.** If Workers AI omits a tool call's `id`, the backend assigns one
+  (`cf_call_…`) and logs `tool_call_id_normalized` on the `llm call` line. To see the raw
+  provider shape (structure only), run the opt-in live tests with `-s`
+  (`tests/llm/test_cloudflare_live.py`).
+
 # unchanged — the stored pgvector embeddings stay valid, no re-embedding:
 EMBEDDING_PROVIDER=gemini
 GEMINI_EMBEDDING_MODEL=gemini-embedding-2

@@ -5,7 +5,9 @@ provider- and model-specific parameters stay here. Chat inference only: the embe
 provider (``app.knowledge.embeddings``) is configured independently.
 """
 
+import uuid
 from collections.abc import Callable, Sequence
+from typing import Any
 
 import httpx
 from langchain_core.language_models import BaseChatModel
@@ -19,6 +21,7 @@ from app.agent.llm.provider import (
     LLMProvider,
     MessagePreparer,
     ProviderInfo,
+    ResponseNormalizer,
     RetryPolicy,
     StructuredMethod,
 )
@@ -112,6 +115,51 @@ def openai_compatible_messages(messages: Sequence[BaseMessage]) -> list[BaseMess
     return out
 
 
+CORRELATION_ID_PREFIX = "cf_call_"
+
+
+def _usable_id(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def normalize_tool_call_ids(ai: AIMessage) -> tuple[AIMessage, dict[str, Any]]:
+    """Workers AI (OpenAI-compatible) can return a STRUCTURED tool call - known name, JSON
+    arguments - whose ``id`` is missing, null or empty. The graph requires an id to link the
+    call to its ToolMessage, so exactly those calls get a server-side correlation id
+    (``cf_call_<uuid4 hex>``). The id carries no authority; it is only a message link.
+
+    Never changed: a provider-supplied non-empty id (even a duplicate - ambiguous, so the
+    graph refuses it), tool names, arguments, ``invalid_tool_calls`` (unparseable arguments
+    stay unparseable) and the message text. The provider's message object is not mutated."""
+    calls = list(ai.tool_calls)
+    if not calls:
+        return ai, {}
+    fixed = []
+    generated: dict[int, str] = {}
+    for i, call in enumerate(calls):
+        if _usable_id(call.get("id")):
+            fixed.append(call)
+        else:
+            generated[i] = f"{CORRELATION_ID_PREFIX}{uuid.uuid4().hex}"
+            fixed.append({**call, "id": generated[i]})
+    facts: dict[str, Any] = {"tool_calls": len(calls)}
+    if not generated:
+        return ai, facts
+    update: dict[str, Any] = {"tool_calls": fixed}
+    raw = ai.additional_kwargs.get("tool_calls")
+    if isinstance(raw, list) and len(raw) == len(calls):
+        # keep the raw OpenAI-format copy consistent with the parsed calls
+        update["additional_kwargs"] = {
+            **ai.additional_kwargs,
+            "tool_calls": [
+                {**r, "id": generated[i]} if i in generated and isinstance(r, dict) else r
+                for i, r in enumerate(raw)
+            ],
+        }
+    facts["tool_call_id_normalized"] = len(generated)
+    return ai.model_copy(update=update), facts
+
+
 _BUILDERS: dict[ProviderName, Callable[[LLMConfig], BaseChatModel]] = {
     "ollama": _build_ollama,
     "gemini": _build_gemini,
@@ -121,6 +169,7 @@ _BUILDERS: dict[ProviderName, Callable[[LLMConfig], BaseChatModel]] = {
 # call there; results are re-validated with the full Pydantic schema either way.
 _STRUCTURED: dict[ProviderName, StructuredMethod] = {"cloudflare": "tool_call"}
 _PREPARE: dict[ProviderName, MessagePreparer] = {"cloudflare": openai_compatible_messages}
+_NORMALIZE: dict[ProviderName, ResponseNormalizer] = {"cloudflare": normalize_tool_call_ids}
 
 
 def build_provider(config: LLMConfig, *, http_client: httpx.Client | None = None) -> LLMProvider:
@@ -145,6 +194,7 @@ def build_provider(config: LLMConfig, *, http_client: httpx.Client | None = None
         RetryPolicy(max_retries=config.max_retries),
         structured_method=_STRUCTURED.get(config.provider, "json_schema"),
         prepare_messages=_PREPARE.get(config.provider),
+        normalize_response=_NORMALIZE.get(config.provider),
     )
 
 

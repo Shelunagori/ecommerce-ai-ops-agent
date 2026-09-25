@@ -27,12 +27,6 @@ Resolved modelling decisions live in [architecture.md](architecture.md), not her
 | P23 | Execution traces are response-only | Traces are not stored with conversation history, so restored threads show "Execution trace is available for new runs." Persist a trace per run only if reviewers need historical traces. | Portfolio |
 | P24 | No CAPTCHA widget for anonymous sign-in | Supabase recommends CAPTCHA / Turnstile for anonymous sign-ins; the landing page does not pass a captcha token yet, so enabling CAPTCHA in Supabase would block "Try Live Demo" until the widget is added. | Portfolio |
 | P25 | Anonymous checkpoint threads are not pruned | Each demo visitor's conversation lives in LangGraph checkpoints keyed by their subject; there is no automatic pruning (same as P6). Pair with the periodic Supabase anonymous-user cleanup. | Portfolio |
-
-## Resolved
-
-| # | Item | Resolution |
-| --- | --- | --- |
-| P1 / P2 | Hosted demo seeding vs the production seed guard | Decided **(V)**: the guard stays. The synthetic demo data is bootstrapped once from an operator machine with `APP_ENV=staging` against the hosted database (`DEPLOYMENT.md` step 4); the running production service has no bulk-mutation path. |
 | P26 | Live SSE through the hosted proxies is unverified | The stream sends `X-Accel-Buffering: no`, `Cache-Control: no-store` and 15 s heartbeats and was verified locally (TestClient, uvicorn, Playwright dev + production build). Verify on Railway + Vercel that events are not buffered and long runs are not cut by an idle timeout. | Live trace |
 | P27 | Streamed runs hold a worker thread per run | A streamed run executes in the default thread pool (like the synchronous JSON endpoints use Starlette's pool); many concurrent long runs could exhaust workers. Bounded today by the chat rate limits; add an explicit concurrency cap if the deployment scales. | Live trace |
 | P28 | A disconnected read-only run is not cancelled | By design **(V)** the run is not tied to the connection (never a half-applied write); an abandoned read-only run still finishes and spends model budget. Cooperative cancellation between graph steps could be added for read-only runs only. | Live trace |
@@ -40,3 +34,10 @@ Resolved modelling decisions live in [architecture.md](architecture.md), not her
 | P30 | Live Cloudflare Workers AI tool-calling quality is unmeasured | The Cloudflare provider is contract-tested offline (recorded-shape OpenAI-compatible responses, fallback through the real graph). Whether `@cf/meta/llama-4-scout-17b-16e-instruct` reliably returns STRUCTURED tool calls (not JSON as text, which the graph refuses) is verified only by the opt-in live tests; run them before switching production, and compare alternatives (e.g. `@cf/google/gemma-4-26b-a4b-it`, which has built-in reasoning). | Cloudflare LLM |
 | P31 | Public-demo budget is per anonymous identity | The durable budget is keyed by the verified JWT subject; a visitor who signs out and starts a new anonymous session gets a fresh budget. The per-minute per-visitor and GLOBAL demo limits still bound the total; pair with Supabase anonymous sign-in rate limits / CAPTCHA (P24). Old rows can be deleted at any time. | Cloudflare LLM |
 | P32 | Fallback changes provider mid-conversation | A thread may mix Cloudflare and Gemini turns. Provider-specific parts are normalised per request (Cloudflare) or marked foreign (Gemini's documented signature bypass); verify with the live tests when changing either integration's version. | Cloudflare LLM |
+| P33 | Live Workers AI tool-call id shape is inferred, not observed | Production telemetry (`agent_protocol_error` / `tool_call_id`, provider outcome ok, `invalid_tool_calls=1`, `tool_call_count=0`) matches exactly a structured tool call whose `id` is missing/null/empty (reproduced offline); no Cloudflare credentials were available to observe it. The Cloudflare adapter now assigns `cf_call_<uuid>` to such calls. Run `RUN_CLOUDFLARE_INTEGRATION=1 … pytest -s tests/llm/test_cloudflare_live.py` to print the raw shape; duplicate provider ids stay fail-closed **(V)**. | Cloudflare LLM |
+
+## Resolved
+
+| # | Item | Resolution |
+| --- | --- | --- |
+| P1 / P2 | Hosted demo seeding vs the production seed guard | Decided **(V)**: the guard stays. The synthetic demo data is bootstrapped once from an operator machine with `APP_ENV=staging` against the hosted database (`DEPLOYMENT.md` step 4); the running production service has no bulk-mutation path. |

@@ -112,6 +112,9 @@ def provider_json_schema(schema: type[BaseModel]) -> dict[str, Any]:
 
 StructuredMethod = Literal["json_schema", "tool_call"]
 MessagePreparer = Callable[[Sequence[BaseMessage]], list[BaseMessage]]
+# Provider-specific repair of a proven wire-format difference in a returned AIMessage; returns
+# the (possibly new) message and SAFE structural facts for the call log (counts only).
+ResponseNormalizer = Callable[[AIMessage], tuple[AIMessage, dict[str, Any]]]
 
 
 class ChatModelProvider:
@@ -124,17 +127,21 @@ class ChatModelProvider:
         sleep: Callable[[float], None] = time.sleep,
         structured_method: StructuredMethod = "json_schema",
         prepare_messages: MessagePreparer | None = None,
+        normalize_response: ResponseNormalizer | None = None,
     ) -> None:
         """``structured_method``: provider-native JSON schema output (default), or one forced
         tool call whose arguments are the object (providers without JSON-schema mode).
         ``prepare_messages``: provider-specific history normalisation applied right before
-        sending (e.g. drop another provider's metadata); graph state is never changed."""
+        sending (e.g. drop another provider's metadata); graph state is never changed.
+        ``normalize_response``: provider-specific fix-up of a chat response's wire format
+        (Cloudflare: missing tool-call ids); ``None`` for providers that need none."""
         self._chat_model = chat_model
         self._info = info
         self._retry = retry
         self._sleep = sleep
         self._structured_method = structured_method
         self._prepare = prepare_messages or list
+        self._normalize = normalize_response
 
     @property
     def info(self) -> ProviderInfo:
@@ -169,8 +176,12 @@ class ChatModelProvider:
     ) -> ChatResult:
         """One chat turn with ``tools`` bound. Returns the provider's AIMessage unchanged
         (tool calls and provider metadata such as Gemini thought signatures included)."""
-        value, attempts, duration = self._with_retry(
-            lambda: self._chat_attempt(messages, tools), messages, operation, prompt_version
+        (value, _facts), attempts, duration = self._with_retry(
+            lambda: self._chat_attempt(messages, tools),
+            messages,
+            operation,
+            prompt_version,
+            facts=lambda v: v[1],
         )
         return ChatResult(
             message=value,
@@ -186,6 +197,8 @@ class ChatModelProvider:
         messages: Sequence[BaseMessage],
         operation: str,
         prompt_version: str | None,
+        *,
+        facts: Callable[[Any], dict[str, Any]] | None = None,
     ) -> tuple[Any, int, float]:
         started = time.perf_counter()
         input_chars = sum(len(str(m.content)) for m in messages)
@@ -205,17 +218,20 @@ class ChatModelProvider:
                 self._log(operation, prompt_version, "error", err, attempt, started, input_chars)
                 raise err from None
             duration = round((time.perf_counter() - started) * 1000, 1)
-            self._log(operation, prompt_version, "ok", None, attempt, started, input_chars)
+            extra = facts(value) if facts else None
+            self._log(operation, prompt_version, "ok", None, attempt, started, input_chars, extra)
             return value, attempt, duration
 
     def _chat_attempt(
         self, messages: Sequence[BaseMessage], tools: Sequence[BaseTool]
-    ) -> AIMessage:
+    ) -> tuple[AIMessage, dict[str, Any]]:
         runnable = self._chat_model.bind_tools(list(tools)) if tools else self._chat_model
         out = runnable.invoke(self._prepare(messages))
         if not isinstance(out, AIMessage):
             raise LLMOutputError(error_type="unexpected_message_type")
-        return out
+        if self._normalize is None:
+            return out, {"tool_calls": len(out.tool_calls)} if out.tool_calls else {}
+        return self._normalize(out)
 
     def _attempt(self, schema: type[T], messages: Sequence[BaseMessage]) -> T:
         if self._structured_method == "tool_call":
@@ -270,6 +286,7 @@ class ChatModelProvider:
         attempts: int,
         started: float,
         input_chars: int,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         # Never logs prompts, responses or credentials: identifiers and classifications only.
         fields: dict[str, Any] = {
@@ -286,6 +303,8 @@ class ChatModelProvider:
         if err is not None:
             fields["error_code"] = err.code
             fields["error_type"] = err.error_type
+        if extra:  # structural counts only (e.g. tool_calls, tool_call_id_normalized)
+            fields.update(extra)
         level = logging.INFO if outcome == "ok" else logging.WARNING
         logger.log(level, "llm call", extra=fields)
 
