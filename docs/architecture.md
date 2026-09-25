@@ -17,9 +17,9 @@ then [Actions, approvals and the production path](#actions-approvals-and-the-pro
 | Tool-calling loop | `app/agent/assistant` — explicit, bounded (Step-5 reference / parity oracle) |
 | Graph orchestration | `app/agent/graph` — LangGraph `StateGraph` (model / tools / retrieve / propose / approval / execute) |
 | Policy RAG in the graph | `app/agent/rag` — `search_policy_knowledge`, grounding validator, RAG evaluation |
-| Language models | `app/agent/llm` — provider-neutral layer over Ollama (local) and Gemini (hosted) |
+| Language models | `app/agent/llm` — provider-neutral layer: Ollama (local development); Cloudflare Workers AI primary + Gemini fallback (hosted) — see [Provider split](#provider-split-local-development-vs-hosted) |
 | Policy knowledge | `app/knowledge` + `knowledge_documents` / `knowledge_chunks` (`0002`) |
-| Policy embeddings | `app/knowledge/embeddings` (Ollama or Gemini) + `knowledge_chunk_embeddings` (`0003`, pgvector) |
+| Policy embeddings | `app/knowledge/embeddings` (Ollama locally, Gemini hosted; one isolated profile each) + `knowledge_chunk_embeddings` (`0003`, pgvector) |
 | Write actions | `app/actions` + `action_requests` / `store_credit_transactions` (`0004`) |
 | Audit / run records | `app/observability` + `audit_events` / `agent_runs` (`0005`) |
 | Identity / tenancy | `app/auth` (Supabase JWT) + `tenant_memberships` (`0006`) |
@@ -54,7 +54,7 @@ then [Actions, approvals and the production path](#actions-approvals-and-the-pro
 | `app/agent/tools/registry.py` | `build_commerce_tools()` — the explicit list of permitted tools |
 | `app/agent/tools/invoke.py` | Direct invocation with a trusted context (CLI/tests) |
 | `app/agent/llm/config.py` | `LLMConfig.from_settings()` — the configuration boundary (provider, model, key, timeout, retries) |
-| `app/agent/llm/factory.py` | `get_llm_provider()` — the only place that knows Ollama vs Gemini |
+| `app/agent/llm/factory.py` | `get_llm_provider()` — the only place that knows the concrete chat providers (Ollama, Gemini; Cloudflare added later) |
 | `app/agent/llm/provider.py` | `LLMProvider` protocol, `ChatModelProvider`, `RetryPolicy`, logging |
 | `app/agent/llm/classify.py` | Provider/transport exceptions → typed `LLMError`s |
 | `app/agent/llm/errors.py` | `LLMConfigurationError`/`LLMAuthenticationError`, `LLMUnavailableError`, `LLMTimeoutError`, `LLMOutputError`, `LLMInputError`, `LLMInternalError` |
@@ -1186,6 +1186,39 @@ Browser ──POST /api/agent/messages/stream (fetch + ReadableStream)──▶ 
   hollow placeholders and "Not used" dashes; all motion is CSS and disabled for
   `prefers-reduced-motion`; statuses are also text (`sr-only`) and announced via `role=status`
   (failures `role=alert`). Auto-follows the active step unless the reader scrolled up.
+
+## Provider split: local development vs hosted
+
+| | Chat / tool calling | Chat fallback | Policy embeddings |
+| --- | --- | --- | --- |
+| Local development | Ollama (`LLM_PROVIDER=ollama`) | none | Ollama (`EMBEDDING_PROVIDER=ollama`) |
+| Hosted (production) | Cloudflare Workers AI (`LLM_PROVIDER=cloudflare`) | Gemini, per model call (`LLM_FALLBACK_PROVIDER=gemini`) | Gemini (`EMBEDDING_PROVIDER=gemini`) |
+
+* **Chat abstraction.** Graph nodes call one `LLMProvider` interface; `factory.py` builds the
+  concrete provider from configuration. Changing the chat provider is configuration only.
+* **Local path.** The normal local workflow runs chat and embeddings on Ollama, with local
+  PostgreSQL + pgvector, and needs no Cloudflare or Gemini credentials.
+* **Hosted path.** Cloudflare Workers AI answers chat / tool calls; Gemini serves ONE model
+  call when Cloudflare is rate-limited, over quota, timed out or unavailable (never on
+  protocol, grounding or auth errors; tools and actions are never replayed).
+* **Ollama is not part of production.** `APP_ENV=production` refuses `ollama` as chat
+  provider, fallback and embedding provider (`app/core/production.py`), so it is never a
+  production fallback.
+* **Embeddings are selected separately** (`EMBEDDING_PROVIDER`), independent of the chat
+  provider and its fallback.
+* **Profile isolation.** Every stored vector carries its profile — provider, model, resolved
+  revision/digest, dimensions, input version. A query vector is compared only with document
+  vectors of the same profile, and a profile without vectors fails with
+  `embedding_profile_not_materialized` instead of falling back to another one.
+* **Why Ollama and Gemini vectors never mix.** Different models produce different vector
+  spaces; cosine similarity across them is meaningless even at the same dimension (768).
+  Local and hosted embeddings are therefore not interchangeable: switching the embedding
+  provider or model means materializing that profile (`scripts.embed_policies`).
+
+Rationale: local development should not depend on hosted inference credentials or quotas;
+the hosted deployment uses managed providers (there is no Ollama server next to a hosted
+API); and embedding-space compatibility is enforced by the profile, independently of which
+chat provider answers.
 
 ## Chat providers: Cloudflare Workers AI primary, Gemini fallback
 

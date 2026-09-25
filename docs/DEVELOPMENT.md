@@ -8,6 +8,21 @@ Local setup, command reference and test commands. For the overview see the
 - Python 3.11+ and [uv](https://docs.astral.sh/uv/) (uv installs Python 3.12 from `.python-version` if needed)
 - Node.js 22.22.2+ (or 24.15+) and npm — `nvm use` reads `frontend/.nvmrc`; Node 20 is not supported (jsdom/vitest need 22+)
 - Docker (for local PostgreSQL)
+- [Ollama](https://ollama.com) for the model-backed paths (chat and policy embeddings); the
+  offline demo in [DEMO_SCENARIOS.md](DEMO_SCENARIOS.md) needs no model at all
+
+### Typical local setup (no hosted credentials)
+
+| Concern | Local development | Hosted (for comparison, see DEPLOYMENT.md) |
+| --- | --- | --- |
+| Chat / tool calling | Ollama (`LLM_PROVIDER=ollama`, default) | Cloudflare Workers AI, Gemini fallback per call |
+| Policy embeddings | Ollama (`EMBEDDING_PROVIDER=ollama`, default) | Gemini |
+| Database | local PostgreSQL + pgvector (Docker) | Supabase PostgreSQL + pgvector |
+
+Cloudflare and Gemini credentials are needed only when you deliberately test a hosted
+provider (the opt-in live tests below). Local Ollama vectors and hosted Gemini vectors are
+separate embedding profiles and never mix; a database embedded with one profile must be
+embedded again (`embed_policies`) before semantic retrieval works with another.
 
 ## 1. Environment variables
 
@@ -28,12 +43,14 @@ Make the password in `backend/.env`'s `DATABASE_URL` match `POSTGRES_PASSWORD` i
 | `DEBUG` | backend | Verbose logging when `true` |
 | `DATABASE_URL` | backend | PostgreSQL URL. `postgres://`, `postgresql://` are normalised to `postgresql+psycopg://` |
 | `CORS_ORIGINS` | backend | Comma-separated allowed origins, e.g. `http://localhost:3000,https://your-app.vercel.app` |
-| `LLM_PROVIDER` | backend | `ollama` (local, default) or `gemini` (hosted demo) |
+| `LLM_PROVIDER` | backend | `ollama` (local development, default); hosted: `cloudflare` (production primary) or `gemini` |
+| `LLM_FALLBACK_PROVIDER` | backend | optional per-call chat fallback for availability failures (production: `gemini`); unset locally |
+| `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_MODEL` | backend | Workers AI chat (hosted); not needed locally |
 | `LLM_TIMEOUT_SECONDS`, `LLM_MAX_RETRIES` | backend | Per-request timeout, 1–300 s (default 60); retries for transient failures only (default 1, max 2) |
 | `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | backend | Local Ollama server and model (default `qwen3:4b-instruct`, the non-thinking Qwen3-4B-Instruct-2507; any other Ollama model, e.g. `llama3.2:3b`, is selectable) |
 | `GEMINI_API_KEY`, `GEMINI_MODEL` | backend | Gemini key (required only for `gemini`) and model (default `gemini-3.8-flash`) |
 | `ASSISTANT_MAX_MODEL_ROUNDS`, `ASSISTANT_MAX_TOOL_CALLS`, `ASSISTANT_MAX_TOOL_CALLS_PER_TURN` | backend | Assistant loop bounds (defaults 5 / 8 / 4; hard maxima 10 / 20 / 8) |
-| `EMBEDDING_PROVIDER`, `OLLAMA_EMBEDDING_MODEL`, `GEMINI_EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | backend | Policy embeddings (`ollama` local default, `gemini` hosted) |
+| `EMBEDDING_PROVIDER`, `OLLAMA_EMBEDDING_MODEL`, `GEMINI_EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | backend | Policy embeddings, chosen independently of chat (`ollama` local default, `gemini` hosted); each provider/model is its own profile |
 | `ACTION_APPROVAL_TTL_SECONDS`, `ACTION_EXECUTION_CLAIM_TIMEOUT_SECONDS`, `STORE_CREDIT_MAX_AMOUNT` | backend | Approval-gated actions (defaults 900 s / 120 s / 100.00) |
 | `AUTH_MODE`, `SUPABASE_URL`, `SUPABASE_JWT_AUDIENCE`, `SUPABASE_JWT_SECRET`, `DEMO_USER_SUBJECT` | backend | `demo` (local header) or `supabase` (JWT + memberships) |
 | `AGENT_RATE_LIMIT_PER_MINUTE` | backend | Chat messages per user and tenant per minute (default 20; 0 disables) |

@@ -66,7 +66,7 @@ flowchart LR
   U[Browser<br/>Next.js UI] -->|Bearer JWT, X-Tenant-ID selector| API[FastAPI]
   API --> AUTH[Principal<br/>JWT + memberships]
   API --> G[LangGraph agent]
-  G --> M[LLM provider layer<br/>Cloudflare Workers AI primary<br/>Gemini fallback per call · Ollama local]
+  G --> M[LLM provider layer<br/>hosted: Cloudflare Workers AI → Gemini fallback<br/>local dev: Ollama]
   G --> T[Read-only commerce tools]
   G --> R[Policy retrieval<br/>pgvector]
   G --> P[Action proposals]
@@ -108,10 +108,12 @@ Key decisions (details in [docs/architecture.md](docs/architecture.md)):
 * **Fail closed.** Infrastructure failures become stable error codes (never "no policy
   exists"); uncertain non-idempotent writes are never retried automatically; durable
   checkpoints let an approved request resume idempotently after a crash.
-* **Local vs hosted.** Ollama for local development (chat + embeddings). Hosted: Cloudflare
-  Workers AI for chat / tool calling, Gemini as the per-call chat fallback, Gemini for
-  embeddings. Each embedding provider/model/revision is a separate profile — vectors never
-  mix.
+* **Local vs hosted.** *Local development:* Ollama for chat / tool calling and for
+  embeddings — no hosted credentials needed. *Hosted:* Cloudflare Workers AI for chat / tool
+  calling, Gemini as the per-call chat fallback (availability failures only), Gemini for
+  embeddings; production refuses Ollama. Each embedding provider/model/revision is its own
+  profile, so local Ollama vectors and hosted Gemini vectors never mix (a new profile needs
+  `embed_policies`).
 * **One process, one database.** No Redis, queues or microservices; PostgreSQL holds business
   data, knowledge, embeddings, actions, audit and checkpoints.
 

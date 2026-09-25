@@ -119,7 +119,7 @@ export const DECISIONS = [
   { title: "SQL tools for facts, RAG for policy", body: "Exact, changing, tenant-scoped facts are queried; prose rules are retrieved and cited." },
   { title: "Modular monolith", body: "One FastAPI service and one PostgreSQL: no fake microservices, queues or Redis without a measured need." },
   { title: "Durable checkpoints for approvals", body: "A pending approval survives restarts and can be resumed by any API instance." },
-  { title: "Provider abstraction", body: "Chat: Cloudflare Workers AI primary with Gemini as fallback (Ollama locally). Embeddings are a separate, unchanged Gemini profile — vectors never mix." },
+  { title: "Provider abstraction", body: "Hosted: Cloudflare Workers AI for chat/tool calling with Gemini fallback; Gemini for policy embeddings. Local development: Ollama provides both chat and embeddings. Embedding profiles are isolated by provider/model/revision, so vector spaces never mix." },
   { title: "Fallback at the model-call boundary", body: "Only a rate-limited, timed-out or unavailable model CALL is retried on the fallback, with the same history. Tools, retrieval and approved actions are never replayed; the trace names the provider that answered." },
   { title: "Explicit capability boundaries", body: "After retrieval no commerce tool runs; the model can only propose writes; the public demo gets none." },
   { title: "Honest observability", body: "The execution trace is streamed live from real graph execution (SSE over POST) — safe metadata only, never reasoning or prompts." },

@@ -7,7 +7,7 @@ function Node({
   className = "",
 }: {
   title: string;
-  sub?: string;
+  sub?: string | string[]; // an array renders one line per entry
   authority?: Authority;
   className?: string;
 }) {
@@ -22,7 +22,11 @@ function Node({
         )}
         {title}
       </p>
-      {sub && <p className="mt-0.5 text-xs text-slate-500">{sub}</p>}
+      {(Array.isArray(sub) ? sub : sub ? [sub] : []).map((line) => (
+        <p key={line} className="mt-0.5 text-xs text-slate-500">
+          {line}
+        </p>
+      ))}
     </div>
   );
 }
@@ -67,7 +71,7 @@ export default function ArchitectureDiagram() {
           <Node title="LangGraph orchestration" sub="MODEL · TOOLS · RETRIEVE · PROPOSE · APPROVAL · EXECUTE" authority="deterministic" />
           <Node
             title="LLM provider layer"
-            sub="Cloudflare Workers AI primary · Gemini fallback per model call (Ollama locally)"
+            sub={["Hosted: Cloudflare Workers AI → Gemini fallback per call", "Local dev: Ollama"]}
             authority="model"
           />
         </div>
@@ -88,7 +92,10 @@ export default function ArchitectureDiagram() {
       <Group label="Supabase · PostgreSQL + pgvector">
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
           <Node title="Commerce tables" sub="composite tenant FKs" />
-          <Node title="Policy chunks + vectors" sub="pgvector; Gemini embeddings (separate from chat)" />
+          <Node
+            title="Policy chunks + vectors"
+            sub={["pgvector · one profile per embedding model", "Hosted: Gemini · Local dev: Ollama"]}
+          />
           <Node title="Actions + audit events" sub="idempotency keys, same transaction" />
           <Node title="LangGraph checkpoints" sub="durable pause / resume" />
         </div>

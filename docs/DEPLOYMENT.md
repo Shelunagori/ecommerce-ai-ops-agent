@@ -70,7 +70,8 @@ values.
 ### Chat provider: Cloudflare Workers AI primary, Gemini fallback
 
 The LLM provider and the embedding provider are **independent**. The deployed
-configuration (placeholders only):
+configuration (placeholders only) — production means `LLM_PROVIDER=cloudflare`,
+`LLM_FALLBACK_PROVIDER=gemini`, `EMBEDDING_PROVIDER=gemini`:
 
 ```
 LLM_PROVIDER=cloudflare
@@ -80,7 +81,8 @@ CLOUDFLARE_API_TOKEN=<SECRET: token with Workers AI Read>
 CLOUDFLARE_MODEL=@cf/zai-org/glm-4.7-flash
 GEMINI_API_KEY=<SECRET: fallback chat + embeddings>
 
-# unchanged by the chat provider — the stored pgvector embeddings stay valid:
+# independent of the chat provider; the hosted Gemini profile is materialized by
+# embed_policies (runbook step 4) — local Ollama vectors are a different profile:
 EMBEDDING_PROVIDER=gemini
 GEMINI_EMBEDDING_MODEL=gemini-embedding-2
 EMBEDDING_DIMENSIONS=768
@@ -143,8 +145,9 @@ project CA). Source: Supabase "Connect to your database" guide (checked Sept 202
   *Database → Extensions* before the first deploy. Downgrades never drop the extension.
 * **No local dependency at start-up.** Construction is network-free (models, embeddings,
   JWKS and the checkpoint pool are created lazily); `/health` answers without a database.
-  Ollama is never needed in production: a hosted chat provider (`cloudflare` or `gemini`)
-  and `EMBEDDING_PROVIDER=gemini` are enforced.
+  Ollama is the local-development provider and is **not supported in production**:
+  `APP_ENV=production` refuses `ollama` as `LLM_PROVIDER`, as `LLM_FALLBACK_PROVIDER` and as
+  `EMBEDDING_PROVIDER` (the fallback chain is Cloudflare → Gemini only).
 * **Live execution stream.** `POST /api/agent/messages/stream` and
   `/api/agent/actions/{id}/approve|reject/stream` answer `text/event-stream` with
   `X-Accel-Buffering: no`, `Cache-Control: no-store` and a comment heartbeat every 15 s, so an
