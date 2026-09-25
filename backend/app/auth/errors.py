@@ -33,3 +33,21 @@ class AuthNotConfiguredError(AppError):
     status_code = 503
     code = "auth_not_configured"
     message = "Authentication is not configured on this server."
+
+
+class PublicDemoDisabledError(AppError):
+    status_code = 403
+    code = "public_demo_disabled"
+    message = "The public demo is not enabled on this server."
+
+
+class PublicDemoUnavailableError(AppError):
+    status_code = 503
+    code = "public_demo_unavailable"
+    message = "The public demo is temporarily unavailable."
+
+
+class PublicDemoReadOnlyError(AppError):
+    status_code = 403
+    code = "public_demo_read_only"
+    message = "The public demo is read-only. Sign in with a reviewer account to use actions."

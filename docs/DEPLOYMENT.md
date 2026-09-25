@@ -36,6 +36,9 @@ flowchart LR
 | `SUPABASE_URL` | yes | `https://<project-ref>.supabase.co` |
 | `SUPABASE_JWT_AUDIENCE` | no | default `authenticated` |
 | `SUPABASE_JWT_SECRET` | legacy HS256 projects only | prefer asymmetric JWKS keys |
+| `PUBLIC_DEMO_ENABLED` | no | `true` enables "Try Live Demo" (needs Supabase anonymous sign-ins) |
+| `PUBLIC_DEMO_TENANT_SLUG` | no | default `bluepeak-retail`; must exist or demo requests fail with 503 |
+| `PUBLIC_DEMO_RATE_LIMIT_PER_MINUTE`, `PUBLIC_DEMO_GLOBAL_RATE_LIMIT_PER_MINUTE` | no | per anonymous visitor (default 5) and shared by all visitors (default 60) |
 | `CORS_ORIGINS` | yes | the exact Vercel origin(s), `https://…`, comma-separated |
 | `LLM_PROVIDER` | yes | `gemini` |
 | `GEMINI_API_KEY` | yes | secret |
@@ -131,6 +134,28 @@ project CA). Source: Supabase "Connect to your database" guide (checked Sept 202
 6. **GitHub:** protect `main` (required checks `backend`, `frontend`, `e2e`, `security`; see
    `docs/CI_CD.md`). No GitHub secrets are needed.
 7. **Smoke checks** (below).
+
+## Public demo ("Try Live Demo") — manual Supabase steps
+
+Code cannot switch these on; an operator does, once:
+
+1. **Supabase Dashboard → Authentication → Sign In / Providers → enable *Anonymous
+   Sign-Ins*.** Anonymous users get a normal `authenticated` JWT plus the claim
+   `is_anonymous: true`, which the backend verifies (signature, issuer, audience) before
+   trusting it.
+2. **Railway:** set `PUBLIC_DEMO_ENABLED=true` (optionally `PUBLIC_DEMO_TENANT_SLUG`).
+3. **Abuse protection (recommended):** keep Supabase's IP rate limit for anonymous sign-ins
+   (Authentication → Rate Limits). Supabase recommends CAPTCHA / Cloudflare Turnstile for
+   anonymous sign-ins; note that the frontend does not yet pass a CAPTCHA token, so enabling
+   CAPTCHA requires adding the widget first (pending item P24). The API adds its own
+   per-visitor and global demo message budgets.
+4. **Cleanup:** anonymous users accumulate. Per Supabase guidance, delete old ones
+   periodically (SQL editor), e.g.
+   `delete from auth.users where is_anonymous is true and created_at < now() - interval '30 days';`
+   The app stores no per-visitor rows except their own LangGraph checkpoint threads.
+
+No `tenant_memberships` row is needed for anonymous visitors, and no service-role key is
+used anywhere in the frontend.
 
 ## Smoke checks
 

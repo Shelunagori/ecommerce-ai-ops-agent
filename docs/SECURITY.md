@@ -49,6 +49,33 @@ below is backed by tests, and the critical ones by mutations that must turn the 
   placeholders; settings hold keys as `SecretStr`; `check_env` prints names only.
 * **Container.** Non-root user, `$PORT`, no tests or `.env` in the image.
 
+## Public demo (anonymous visitors)
+
+* Identity: a Supabase anonymous session yields a normal signed JWT; only a **verified** claim
+  `is_anonymous: true` (a JSON boolean) marks the principal as a public-demo visitor. Headers,
+  body fields or strings such as `"true"` never do (tests: `tests/db/test_public_demo.py`).
+* Tenant: exactly one configured synthetic tenant (`PUBLIC_DEMO_TENANT_SLUG`), role `member`.
+  No `tenant_memberships` row is read or written; selecting any other tenant is 403; a missing
+  demo tenant fails closed (503); `PUBLIC_DEMO_ENABLED=false` refuses anonymous users (403).
+* Read-only by construction: the demo principal gets a graph profile **without** action tools
+  (`commerce-assistant-v3-public-demo`), action resources answer 403 `public_demo_read_only`,
+  and `Principal.can_approve` is false even if a role were mis-assigned. A proposal call emitted
+  anyway is an unknown tool: nothing is persisted or written.
+* Isolation: all visitors share the immutable synthetic business data; conversations never
+  mix, because checkpoint threads are keyed by the visitor's own JWT subject.
+* Abuse: per-visitor and global demo message budgets (in-process) in addition to Supabase's
+  sign-in rate limits.
+
+## Execution trace guarantees
+
+The Agent Execution Trace (`app/agent/trace.py`) is built by the runner from the graph's own
+execution records, in executed order (model round → capabilities it requested → next round).
+It contains fixed labels plus identifiers, counts, outcomes and measured durations only —
+never prompts, messages, model output or reasoning, tool arguments, retrieved text, SQL,
+embeddings, tenant ids or secrets (asserted in `tests/db/test_execution_trace.py`, with
+mutations that must fail). It is returned with the response and not stored with the
+conversation history.
+
 ## Verification
 
 | Check | Result |
@@ -67,5 +94,7 @@ below is backed by tests, and the critical ones by mutations that must turn the 
 * The CSP allows `'unsafe-inline'` scripts (Next.js bootstrap without nonces) (P18).
 * Supabase JS keeps the session in `localStorage` (library default); an XSS would expose it —
   mitigated by the CSP and by never rendering HTML (P18).
+* Public demo: no CAPTCHA widget yet (P24); anonymous visitors' checkpoint threads are not
+  pruned automatically (P25).
 * `arguments_hash` is optional on approve at the API level (the UI always sends it; arguments
   are immutable after proposal) **(V)**.

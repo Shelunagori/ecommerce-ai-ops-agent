@@ -63,6 +63,7 @@ from app.agent.graph.state import (
 from app.agent.llm import LLMProvider
 from app.agent.rag.capability import SEARCH_POLICY_KNOWLEDGE
 from app.agent.tools import build_commerce_tools
+from app.agent.trace import build_execution_trace
 from app.core.request_context import request_id_var
 
 logger = logging.getLogger("app.agent.graph")
@@ -96,6 +97,8 @@ class CommerceGraphAssistant:
         self._tools = tuple(tools if tools is not None else build_commerce_tools())
         self._limits = limits or AssistantLimits.from_settings()
         self._checkpointed = checkpointer is not None
+        # Durable = PostgreSQL saver (survives restarts); shown as such in the execution trace.
+        self._durable_checkpoints = type(checkpointer).__name__ == "PostgresSaver"
         self._profile = profile
         self._run_recorder = run_recorder
         self._actions = _action_factory(actions) if profile.actions else None
@@ -361,7 +364,7 @@ class CommerceGraphAssistant:
             pending = values.get("pending_action")
             if pending is None:  # pragma: no cover - only the approval node interrupts
                 raise RuntimeError("graph interrupted without a pending action")
-            return self._build_result(values, started, approval_text(pending), pending)
+            return self._build_result(values, started, approval_text(pending), pending, paused=True)
         return self._build_result(values, started, values.get("answer"), values.get("action"))
 
     def _build_result(
@@ -370,9 +373,12 @@ class CommerceGraphAssistant:
         started: float,
         answer: Any,
         action: dict[str, Any] | None,
+        *,
+        paused: bool = False,
     ) -> AssistantResult:
         if not isinstance(answer, str) or not answer:
             raise RuntimeError("graph finished without an answer or an error")  # pragma: no cover
+        duration_ms = round((time.perf_counter() - started) * 1000, 1)
         return AssistantResult(
             answer=answer,
             provider=self._provider.info.provider,
@@ -380,10 +386,19 @@ class CommerceGraphAssistant:
             prompt_version=self._profile.prompt_version,
             model_calls=values.get("model_calls", 0),
             tool_calls=_tool_summaries(values),
-            duration_ms=round((time.perf_counter() - started) * 1000, 1),
+            duration_ms=duration_ms,
             retrievals=_retrieval_summaries(values),
             citations=_final_citations(values),
             action=ActionSummary.from_view(action) if action is not None else None,
+            execution_trace=build_execution_trace(
+                values,
+                provider=self._provider.info.provider,
+                duration_ms=duration_ms,
+                checkpointed=self._checkpointed,
+                durable_checkpoints=self._durable_checkpoints,
+                paused=paused,
+                action=action,
+            ),
         )
 
     def _log(

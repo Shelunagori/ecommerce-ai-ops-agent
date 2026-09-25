@@ -39,3 +39,28 @@ export async function authHeaders(tenantId?: string): Promise<Record<string, str
   if (tenantId) headers["X-Tenant-ID"] = tenantId;
   return headers;
 }
+
+export type DemoSignInResult = { ok: true; reused: boolean } | { ok: false; message: string };
+
+/**
+ * "Try Live Demo": reuse an existing session, otherwise create a Supabase ANONYMOUS session.
+ * Only the public anon/publishable key is used. What the visitor may do is decided by the
+ * backend from the VERIFIED token (`is_anonymous`), never by anything sent from here.
+ */
+export async function startPublicDemo(): Promise<DemoSignInResult> {
+  const sb = supabase();
+  if (!sb) return { ok: false, message: "Sign-in is not configured for this deployment." };
+  const { data } = await sb.auth.getSession();
+  if (data.session) return { ok: true, reused: true };
+  const { error } = await sb.auth.signInAnonymously();
+  if (error) {
+    const disabled = /anonymous/i.test(error.message) && /disabled|not enabled/i.test(error.message);
+    return {
+      ok: false,
+      message: disabled
+        ? "The public demo is not available right now. Try again later or use Reviewer Sign In."
+        : "Could not start the demo session. Please try again.",
+    };
+  }
+  return { ok: true, reused: false };
+}

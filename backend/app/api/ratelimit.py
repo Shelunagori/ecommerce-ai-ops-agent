@@ -13,6 +13,7 @@ import threading
 import time
 from collections import OrderedDict, deque
 from collections.abc import Callable
+from typing import Any
 
 from app.core.errors import AppError
 
@@ -84,3 +85,29 @@ def limiter_for(app) -> RateLimiter:
         limiter = RateLimiter(app.state.settings.agent_rate_limit_per_minute)
         app.state.rate_limiter = limiter
     return limiter
+
+
+def _limiter(app: Any, attr: str, limit: int) -> RateLimiter:
+    limiter = getattr(app.state, attr, None)
+    if limiter is None:
+        limiter = RateLimiter(limit)
+        setattr(app.state, attr, limiter)
+    return limiter
+
+
+def charge_message(app: Any, principal: Any) -> None:
+    """Charge one chat message. Public-demo (anonymous) visitors have their own, stricter
+    per-visitor budget plus one budget shared by all anonymous visitors."""
+    settings = app.state.settings
+    key = f"{principal.subject}:{principal.tenant.tenant_id}"
+    if getattr(principal, "public_demo", False):
+        _limiter(app, "public_demo_rate_limiter", settings.public_demo_rate_limit_per_minute).check(
+            key
+        )
+        _limiter(
+            app,
+            "public_demo_global_rate_limiter",
+            settings.public_demo_global_rate_limit_per_minute,
+        ).check("public-demo")
+        return
+    limiter_for(app).check(key)

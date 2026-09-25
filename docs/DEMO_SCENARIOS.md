@@ -94,8 +94,17 @@ semantic retrieval achieved exact-chunk hit@1 of 1.00 versus 0.40 for lexical re
 
 ---
 
+### Hosted public demo (Try Live Demo)
+
+On the deployed app, **Try Live Demo** opens a read-only session on BluePeak Retail (badge
+"Public Demo · Read-only"). Scenarios 1–3 work as above, each with its execution trace;
+"Cancel ORD-1004" gets a read-only explanation and nothing is created or changed. Scenarios
+4–5 need a reviewer account with the `approver` role.
+
 ### What to point out while demoing
 
+* The **Agent Execution Trace** panel shows the recorded path of each run (graph steps,
+  tools, retrieval, grounding, approval) — no prompts or model reasoning.
 * Every action and decision is in `audit_events`; every agent run in `agent_runs`
   (`docs/OBSERVABILITY.md`).
 * The conversation survives an API restart: pending approvals live in PostgreSQL

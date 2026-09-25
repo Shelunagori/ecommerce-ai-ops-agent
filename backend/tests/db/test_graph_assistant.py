@@ -258,6 +258,7 @@ RESULT_KEYS = {
     "retrievals",  # Step 9 (empty for commerce-only questions)
     "citations",
     "action",  # Step 10 (null: the CLI runs the read-only RAG profile)
+    "execution_trace",  # additive: ordered safe run trace (app.agent.trace)
 }
 
 

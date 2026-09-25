@@ -401,3 +401,36 @@ deployments. Decisions marked **(V)** are the implementer's and can be vetoed.
   time. No dependency versions changed (the lock also now records the exact
   `@playwright/test` pin). On Node 22: `npm ci`, 28 unit tests, lint, typecheck, build and
   8/8 e2e green.
+
+## Portfolio experience (public demo, execution trace, `/review`)
+
+**Status:** complete locally. Supabase anonymous sign-ins must be enabled by an operator
+(`docs/DEPLOYMENT.md`). Nothing committed or deployed by the assistant.
+
+- **Public demo:** verified `is_anonymous: true` → one configured tenant
+  (`PUBLIC_DEMO_TENANT_SLUG`, default `bluepeak-retail`) as `member`, read-only graph profile
+  `commerce-assistant-v3-public-demo` (no action tools), action resources 403
+  `public_demo_read_only`, per-visitor + global demo budgets; `PUBLIC_DEMO_ENABLED` off by
+  default; missing demo tenant → 503. Permanent users unchanged (`tenant_memberships`).
+- **Execution trace:** `app/agent/trace.py`, built by the runner from execution records;
+  `AgentResponse.execution_trace`, `DecisionOut.execution_trace` (resumed runs), additive.
+  `RetrievalSummary.retriever` records the retriever identity. **(V)** Response-only, not
+  persisted with history (P23).
+- **Frontend:** auth landing (Try Live Demo / Reviewer Sign In / Review link), demo badge,
+  collapsible trace panel (desktop) and per-answer trace (mobile), public `/review` page.
+- **Contract changes (documented):** result/response key sets gain `execution_trace`
+  (`test_graph_assistant.RESULT_KEYS`, `test_agent_api` contract test); `/api/me` gains
+  `public_demo`.
+- **Tests added:** `tests/db/test_public_demo.py` (21), `tests/db/test_execution_trace.py`
+  (10); frontend `SignIn`, `ExecutionTrace`, `ChatPanelTrace`, `ReviewPage`, `AgentApp`
+  additions (23 new; 28 → 51); Playwright `e2e/portfolio.spec.ts` (8).
+- **Results (2026-09-25):** backend **1346 passed, 22 skipped** (baseline 1315/22), no-DB run
+  758 passed; `ruff`, `ruff format`, `uv lock --check`, `alembic upgrade head` + `alembic check`
+  clean; frontend lint/typecheck clean, **51** unit tests, build OK; Playwright **16/16** in dev
+  and production builds (no CSP violations); gitleaks (history + changed files) clean;
+  pip-audit and `npm audit --omit=dev` clean; actionlint clean.
+- **Mutations (all red, restored):** public demo D1–D9 (D2 first stayed green behind the
+  endpoint guard → added a principal-level test), execution trace T1–T6 (T1 needed a commerce
+  tool in the safety test), security X1–X14 re-run on the new tree.
+- **Blocked / manual:** enable Supabase Anonymous Sign-Ins; set `PUBLIC_DEMO_ENABLED=true` on
+  Railway; live Gemini/Supabase not exercised from the sandbox.

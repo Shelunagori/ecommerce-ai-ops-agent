@@ -7,6 +7,11 @@
   SELECTOR among the user's memberships; a tenant without membership is refused exactly like
   a non-existent one. The trusted ``AgentContext`` is built from the result, never from the
   request body or the model.
+* public demo (``supabase`` mode + ``PUBLIC_DEMO_ENABLED``): a token whose VERIFIED claims
+  carry ``is_anonymous: true`` (Supabase Anonymous Sign-Ins) is given exactly ONE membership,
+  the configured demo tenant, as ``member`` and ``public_demo=True`` (read-only: no approvals,
+  no action capability). No ``tenant_memberships`` rows are read or written for it. Nothing
+  from the request (headers, body) can make a principal anonymous.
 """
 
 from __future__ import annotations
@@ -21,6 +26,8 @@ from sqlalchemy.orm import Session
 from app.auth.errors import (
     AuthenticationRequiredError,
     AuthNotConfiguredError,
+    PublicDemoDisabledError,
+    PublicDemoUnavailableError,
     TenantForbiddenError,
     TenantSelectionRequiredError,
 )
@@ -48,10 +55,23 @@ class Principal:
     tenant: TenantContext
     role: Role
     memberships: tuple[Membership, ...]
+    public_demo: bool = False  # verified anonymous visitor: read-only, one demo tenant
 
     @property
     def can_approve(self) -> bool:
-        return self.role == "approver"
+        return self.role == "approver" and not self.public_demo
+
+    @property
+    def can_use_actions(self) -> bool:
+        """Approval-gated write capabilities (proposals, action resources)."""
+        return not self.public_demo
+
+
+@dataclass(frozen=True)
+class Identity:
+    subject: str
+    memberships: tuple[Membership, ...]
+    public_demo: bool = False
 
 
 def _parse_tenant(raw: str | None) -> uuid.UUID | None:
@@ -82,6 +102,30 @@ def memberships_for(session: Session, subject: str) -> tuple[Membership, ...]:
     return tuple(Membership(r.id, r.slug, r.name, r.role) for r in rows)
 
 
+def is_verified_anonymous(claims: dict) -> bool:
+    """Only a boolean ``true`` in the VERIFIED claims counts (never "true", 1, a header...)."""
+    return claims.get("is_anonymous") is True
+
+
+def public_demo_membership(session: Session, settings: object) -> Membership:
+    if not getattr(settings, "public_demo_enabled", False):
+        raise PublicDemoDisabledError()
+    slug = getattr(settings, "public_demo_tenant_slug", "")
+    row = session.execute(
+        select(Tenant.id, Tenant.slug, Tenant.name).where(Tenant.slug == slug)
+    ).one_or_none()
+    if row is None:  # misconfiguration: fail closed, never fall back to another tenant
+        raise PublicDemoUnavailableError()
+    return Membership(row.id, row.slug, row.name, "member")
+
+
+def _identity(session: Session, claims: dict, settings: object) -> Identity:
+    subject = claims["sub"]
+    if is_verified_anonymous(claims):
+        return Identity(subject, (public_demo_membership(session, settings),), public_demo=True)
+    return Identity(subject, memberships_for(session, subject))
+
+
 def resolve_principal(
     session: Session,
     settings: object,
@@ -107,8 +151,8 @@ def resolve_principal(
         return Principal(settings.demo_user_subject, "demo", tenant, "approver", demo)  # type: ignore[attr-defined]
 
     claims = (verifier or JwtVerifier.from_settings(settings)).verify(_bearer(authorization))
-    subject = claims["sub"]
-    memberships = memberships_for(session, subject)
+    identity = _identity(session, claims, settings)
+    subject, memberships = identity.subject, identity.memberships
     wanted = _parse_tenant(x_tenant_id)
     if wanted is None:
         if len(memberships) == 1:
@@ -121,7 +165,14 @@ def resolve_principal(
         chosen = next((m for m in memberships if m.tenant_id == wanted), None)
         if chosen is None:
             raise TenantForbiddenError()
-    return Principal(subject, "supabase", TenantContext(chosen.tenant_id), chosen.role, memberships)
+    return Principal(
+        subject,
+        "supabase",
+        TenantContext(chosen.tenant_id),
+        chosen.role,
+        memberships,
+        public_demo=identity.public_demo,
+    )
 
 
 def identity_only(
@@ -130,7 +181,7 @@ def identity_only(
     *,
     authorization: str | None,
     verifier: JwtVerifier | None = None,
-) -> tuple[str, tuple[Membership, ...]]:
+) -> Identity:
     """Who is calling and which tenants they may use (for the tenant selector)."""
     if getattr(settings, "auth_mode", "demo") == "demo":
         if getattr(settings, "app_env", "development") == "production":
@@ -141,6 +192,6 @@ def identity_only(
                 select(Tenant.id, Tenant.slug, Tenant.name).order_by(Tenant.slug)
             )
         )
-        return settings.demo_user_subject, demo  # type: ignore[attr-defined]
+        return Identity(settings.demo_user_subject, demo)  # type: ignore[attr-defined]
     claims = (verifier or JwtVerifier.from_settings(settings)).verify(_bearer(authorization))
-    return claims["sub"], memberships_for(session, claims["sub"])
+    return _identity(session, claims, settings)

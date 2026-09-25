@@ -28,6 +28,7 @@ export type RetrievalSummary = {
   error_code: string | null;
   rejected_argument_names: string[];
   duration_ms: number;
+  retriever?: string | null;
 };
 
 export type PolicyCitation = {
@@ -79,6 +80,30 @@ export type ActionResource = {
   events: AuditEvent[];
 };
 
+/** One step of the backend's ordered, safe execution trace (backend/app/agent/trace.py). */
+export type TraceEventKind =
+  | "request"
+  | "model"
+  | "commerce_tool"
+  | "retrieval"
+  | "grounding"
+  | "action_proposal"
+  | "approval"
+  | "action_execution"
+  | "checkpoint"
+  | "response";
+
+export type TraceStatus = "completed" | "waiting" | "rejected" | "failed";
+
+export type ExecutionTraceEvent = {
+  sequence: number;
+  kind: TraceEventKind;
+  label: string;
+  status: TraceStatus;
+  detail: string | null;
+  metadata: Record<string, string | number | boolean | null>;
+};
+
 export type AgentResponse = {
   thread_id: string;
   answer: string;
@@ -89,9 +114,15 @@ export type AgentResponse = {
   retrievals: RetrievalSummary[];
   citations: PolicyCitation[];
   action: ActionSummary | null;
+  /** Absent from older backends; empty for runs without a trace. */
+  execution_trace?: ExecutionTraceEvent[];
 };
 
-export type DecisionResponse = { action: ActionResource; answer: string | null };
+export type DecisionResponse = {
+  action: ActionResource;
+  answer: string | null;
+  execution_trace?: ExecutionTraceEvent[] | null;
+};
 
 export type Membership = {
   tenant_id: string;
@@ -100,7 +131,13 @@ export type Membership = {
   role: "member" | "approver";
 };
 
-export type Me = { subject: string; auth_mode: "demo" | "supabase"; memberships: Membership[] };
+export type Me = {
+  subject: string;
+  auth_mode: "demo" | "supabase";
+  memberships: Membership[];
+  /** True for a verified anonymous "Try Live Demo" visitor (read-only demo tenant). */
+  public_demo?: boolean;
+};
 
 export type HistoryMessage = { id: string; role: "user" | "assistant"; content: string };
 export type History = {

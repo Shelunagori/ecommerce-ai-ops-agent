@@ -326,6 +326,7 @@ class GraphNodes:
                 result_count=len(citations),
                 citations=citations,
                 outcome=outcome,
+                retriever=result.retriever,
             )
         )
         # One update: the original AIMessage and its retrieval ToolMessage.

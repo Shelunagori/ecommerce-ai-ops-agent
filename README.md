@@ -24,6 +24,17 @@ See [docs/COMPLETION_STATUS.md](docs/COMPLETION_STATUS.md).
 | Auditability | `audit_events` for every action/decision, `agent_runs` for every run; no prompts or payloads in logs |
 | UI | Next.js chat with citation cards, activity summary and approval cards |
 
+## Portfolio experience
+
+* **Try Live Demo** — no sign-up: a Supabase anonymous session gets read-only access to the
+  shared synthetic BluePeak tenant ("Public Demo · Read-only"); conversations stay private
+  to each visitor. Reviewer accounts keep the full human-approval flow.
+* **Agent Execution Trace** — every answer shows what the run actually did, in order: graph
+  steps, tools, retrieval (pgvector or full-text), grounding, approval and execution — safe
+  metadata only, never prompts or model reasoning.
+* **`/review`** — a public engineering case study: architecture, request flows, RAG, HITL,
+  security boundaries, evaluation evidence and deployment.
+
 ## Measured results (synthetic, small — regression signals, not general claims)
 
 * **Retrieval:** On the fixed 20-case synthetic retrieval evaluation corpus, semantic

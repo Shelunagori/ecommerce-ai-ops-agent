@@ -126,6 +126,7 @@ def test_chat_request_returns_the_application_contract(h, tenant_a):
         "retrievals",
         "citations",
         "action",
+        "execution_trace",  # additive (portfolio phase): ordered safe run trace
     }
     assert (
         body["answer"] == "ORD-1001 was delivered." and body["tool_calls"][0]["tool"] == "get_order"

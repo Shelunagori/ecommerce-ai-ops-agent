@@ -24,9 +24,11 @@ from app.agent.assistant.result import (
     ToolCallSummary,
 )
 from app.agent.context import AgentContext
+from app.agent.trace import ExecutionTraceEvent
 from app.api.agent_runtime import internal_thread_id, runtime_for
 from app.api.deps import CurrentPrincipal, ReadSession, get_app_settings, get_jwt_verifier
-from app.api.ratelimit import limiter_for
+from app.api.ratelimit import charge_message
+from app.auth.errors import PublicDemoReadOnlyError
 from app.auth.principal import identity_only
 from app.core.request_context import request_id_var
 
@@ -57,6 +59,9 @@ class AgentResponse(BaseModel):
     retrievals: list[RetrievalSummary]
     citations: list[PolicyCitation]
     action: ActionSummary | None = None
+    # Ordered, safe record of what this run did (graph nodes, tools, retrieval, grounding,
+    # approval). Response-only: not stored with the conversation history.
+    execution_trace: list[ExecutionTraceEvent] = []
 
 
 class ActionOut(BaseModel):
@@ -79,6 +84,8 @@ class ActionOut(BaseModel):
 class DecisionOut(BaseModel):
     action: ActionOut
     answer: str | None = None  # the deterministic outcome message when the graph was resumed
+    # Trace of the resumed run (full run incl. the decision); None when no graph was resumed.
+    execution_trace: list[ExecutionTraceEvent] | None = None
 
 
 class MembershipOut(BaseModel):
@@ -92,6 +99,7 @@ class MeOut(BaseModel):
     subject: str
     auth_mode: str
     memberships: list[MembershipOut]
+    public_demo: bool = False  # verified anonymous visitor: read-only demo tenant
 
 
 class HistoryMessage(BaseModel):
@@ -122,7 +130,14 @@ def _response(thread_id: str, r: AssistantResult) -> AgentResponse:
         retrievals=r.retrievals,
         citations=r.citations,
         action=r.action,
+        execution_trace=r.execution_trace,
     )
+
+
+def _require_actions(principal: Any) -> None:
+    """Action resources do not exist for the read-only public demo (not just hidden in UI)."""
+    if not principal.can_use_actions:
+        raise PublicDemoReadOnlyError()
 
 
 def _action_out(view: Any, events: list[dict[str, Any]] | None = None) -> ActionOut:
@@ -133,30 +148,32 @@ def _action_out(view: Any, events: list[dict[str, Any]] | None = None) -> Action
 @router.get("/me", response_model=MeOut)
 def me(request: Request, session: ReadSession) -> MeOut:
     authorization = request.headers.get("Authorization")
-    subject, memberships = identity_only(
+    identity = identity_only(
         session,
         get_app_settings(request),
         authorization=authorization,
         verifier=get_jwt_verifier(request),
     )
     return MeOut(
-        subject=subject,
+        subject=identity.subject,
         auth_mode=get_app_settings(request).auth_mode,
         memberships=[
             MembershipOut(tenant_id=str(m.tenant_id), slug=m.slug, name=m.name, role=m.role)
-            for m in memberships
+            for m in identity.memberships
         ],
+        public_demo=identity.public_demo,
     )
 
 
 @router.post("/agent/messages", response_model=AgentResponse)
 def post_message(body: MessageIn, principal: CurrentPrincipal, request: Request) -> AgentResponse:
     # Before any model call: one user cannot exhaust the hosted model budget.
-    limiter_for(request.app).check(f"{principal.subject}:{principal.tenant.tenant_id}")
+    charge_message(request.app, principal)
     runtime = runtime_for(request.app)
+    assistant = runtime.assistant_for(principal)  # read-only graph for the public demo
     context = _context(principal, request)
     thread = internal_thread_id(principal.subject, body.thread_id)
-    result = runtime.assistant.run(body.text, context, thread_id=thread)
+    result = assistant.run(body.text, context, thread_id=thread)
     return _response(body.thread_id, result)
 
 
@@ -167,10 +184,11 @@ def thread_history(
     thread_id: str = Path(pattern=r"^[A-Za-z0-9_-]{1,48}$"),
 ) -> HistoryOut:
     runtime = runtime_for(request.app)
+    assistant = runtime.assistant_for(principal)
     context = _context(principal, request)
     thread = internal_thread_id(principal.subject, thread_id)
-    messages = [HistoryMessage(**m) for m in runtime.assistant.history(context, thread)]
-    pending = runtime.assistant.pending_approval(context, thread)
+    messages = [HistoryMessage(**m) for m in assistant.history(context, thread)]
+    pending = assistant.pending_approval(context, thread) if principal.can_use_actions else None
     pending_out = None
     if pending is not None:
         pending_out = _action_out(runtime.actions.get(principal.tenant, uuid.UUID(pending["id"])))
@@ -186,12 +204,14 @@ def list_actions(
     ]
     | None = Query(default=None),
 ) -> list[ActionOut]:
+    _require_actions(principal)
     views = runtime_for(request.app).actions.list_requests(principal.tenant, status=status)
     return [_action_out(v) for v in views]
 
 
 @router.get("/agent/actions/{action_id}", response_model=ActionOut)
 def get_action(action_id: uuid.UUID, principal: CurrentPrincipal, request: Request) -> ActionOut:
+    _require_actions(principal)
     actions = runtime_for(request.app).actions
     view = actions.get(principal.tenant, action_id)
     return _action_out(view, actions.events(principal.tenant, action_id))
@@ -204,6 +224,7 @@ def _decide(
     principal: Any,
     request: Request,
 ) -> DecisionOut:
+    _require_actions(principal)
     if not principal.can_approve:
         raise action_errors.ActionForbiddenError()
     runtime = runtime_for(request.app)
@@ -227,6 +248,7 @@ def _decide(
         return DecisionOut(
             action=_action_out(final, runtime.actions.events(principal.tenant, action_id)),
             answer=result.answer,
+            execution_trace=result.execution_trace,
         )
     # No paused graph (already resumed, or resumed but execution did not finish):
     # idempotent decision, and a SAFE retry of an approved-but-unexecuted request.

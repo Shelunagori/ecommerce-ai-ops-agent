@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from app.agent.trace import ExecutionTraceEvent
+
 ToolOutcome = Literal[
     "success",
     "not_found",
@@ -67,6 +69,7 @@ class RetrievalSummary(BaseModel):
     error_code: str | None = None
     rejected_argument_names: list[str] = []
     duration_ms: float
+    retriever: str | None = None  # e.g. "semantic-pgvector-v1" (identity, no query text)
 
 
 class PolicyCitation(BaseModel):
@@ -132,3 +135,6 @@ class AssistantResult(BaseModel):
     citations: list[PolicyCitation] = []
     # Step 10: the approval-gated action of this run, if any (pending while awaiting approval).
     action: ActionSummary | None = None
+    # Ordered, safe execution trace of the graph run (see app.agent.trace). Empty for the
+    # Step-5 reference loop.
+    execution_trace: list[ExecutionTraceEvent] = []

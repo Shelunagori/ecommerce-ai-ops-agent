@@ -10,6 +10,7 @@ Recognised requests (case-insensitive):
 * ``SHP-nnnn`` + a policy word        -> get_shipment, THEN policy search, cited answer
   (commerce first: after retrieval no new commerce tool may run in the turn)
 * ``polic`` / ``compensation`` / ``refund`` / ``return`` -> policy search, cited answer
+* ``SHP-nnnn``                         -> get_shipment, answer with its status
 * ``ORD-nnnn``                         -> get_order, answer with its status
 * anything else                        -> a short greeting
 """
@@ -69,6 +70,11 @@ class KeywordChatModel:
         customer = _CUSTOMER.search(text)
 
         if "cancel" in lowered and order:
+            if PROPOSE_CANCEL_ORDER not in self.bound:  # read-only (public demo) profile
+                return AIMessage(
+                    content="The public demo is read-only, so I cannot cancel orders. "
+                    "A reviewer account with approval rights can propose this action."
+                )
             if not results:
                 return _call(
                     PROPOSE_CANCEL_ORDER,
@@ -110,6 +116,20 @@ class KeywordChatModel:
             if not cited:
                 return AIMessage(content=f"{fact} I could not find a policy that covers this.")
             return AIMessage(content=f"{fact} The compensation policy applies [{cited[0]}].")
+
+        if shipment:  # shipment only (no policy question)
+            number = shipment.group(0).upper()
+            if not results:
+                return _call("get_shipment", shipment_number=number)
+            try:
+                status = (json.loads(str(results[0].content)).get("data") or {}).get("status")
+            except ValueError:
+                status = None
+            return AIMessage(
+                content=f"Shipment {number} is {status}."
+                if status
+                else f"I could not find {number}."
+            )
 
         if any(k in lowered for k in _POLICY_WORDS):
             if not results:

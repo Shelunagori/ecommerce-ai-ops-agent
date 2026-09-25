@@ -1100,6 +1100,25 @@ migrations and checkpoints; `scripts/predeploy.py` runs check → migrate → ch
 Railway config-as-code. Chat is rate limited per user and tenant; API responses carry
 security headers; no public API docs in production. See `DEPLOYMENT.md` and `SECURITY.md`.
 
+## Portfolio experience: public demo, execution trace, `/review`
+
+* **Try Live Demo.** Landing page → Supabase `signInAnonymously()` (anon key only) → verified
+  `is_anonymous` → the configured synthetic tenant (default BluePeak) as `member`, read-only
+  graph profile. Permanent users keep the `tenant_memberships` path. See `SECURITY.md`.
+* **Agent Execution Trace.** `AgentResponse.execution_trace` / `DecisionOut.execution_trace`:
+  ordered `ExecutionTraceEvent`s (`request`, `model`, `commerce_tool`, `retrieval`,
+  `grounding`, `action_proposal`, `approval`, `action_execution`, `checkpoint`, `response`),
+  each with a status (`completed`, `waiting`, `rejected`, `failed`) and whitelisted metadata.
+  Built in `CommerceGraphAssistant._build_result` from state; retrieval summaries now record
+  the retriever identity, so the UI labels pgvector vs full-text honestly. **(V)** Response-only:
+  history shows "Execution trace is available for new runs."
+* **UI.** Desktop: collapsible trace panel beside the chat, following the newest (or
+  selected) run; mobile/tablet: per-answer "View execution trace" disclosure. Technology
+  badges are derived from event kind + metadata only.
+* **`/review`.** Public, static engineering case study (architecture diagram, request
+  walkthroughs, RAG, HITL, security, evaluation, deployment, decisions); plain React/CSS, no
+  new dependency. "Try Live Demo" links to `/?demo=1`, which starts the anonymous session.
+
 ## Open items
 
 Known follow-ups are tracked in [pending-items.md](pending-items.md).

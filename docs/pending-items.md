@@ -24,6 +24,9 @@ Resolved modelling decisions live in [architecture.md](architecture.md), not her
 | P20 | Conversation id is not persisted in the browser | A page reload starts a new conversation; pending approvals remain visible via `GET /api/agent/actions`. Decide whether to list/restore past threads. | Phase 9 |
 | P21 | No streaming responses | Answers arrive when the run finishes (loading state shown). Streaming would need to handle approval interrupts mid-stream. | Phase 6 |
 | P22 | Request body size is bounded only by the platform | Message text is limited to 4000 characters after parsing; the raw body size is not limited by the application. Rely on the hosting proxy or add a limit middleware. | Phase 12 |
+| P23 | Execution traces are response-only | Traces are not stored with conversation history, so restored threads show "Execution trace is available for new runs." Persist a trace per run only if reviewers need historical traces. | Portfolio |
+| P24 | No CAPTCHA widget for anonymous sign-in | Supabase recommends CAPTCHA / Turnstile for anonymous sign-ins; the landing page does not pass a captcha token yet, so enabling CAPTCHA in Supabase would block "Try Live Demo" until the widget is added. | Portfolio |
+| P25 | Anonymous checkpoint threads are not pruned | Each demo visitor's conversation lives in LangGraph checkpoints keyed by their subject; there is no automatic pruning (same as P6). Pair with the periodic Supabase anonymous-user cleanup. | Portfolio |
 
 ## Resolved
 

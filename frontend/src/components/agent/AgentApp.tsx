@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 import { getMe, newThreadId } from "@/lib/agent";
@@ -41,6 +42,20 @@ function Workspace({ onSignOut }: { onSignOut?: () => void }) {
           <p className="text-base font-bold tracking-tight text-slate-900">CommerceOps AI</p>
           <p className="text-xs text-slate-500">Operations assistant · synthetic data only</p>
         </div>
+        <Link
+          href="/review"
+          className="text-sm font-medium text-indigo-700 hover:text-indigo-900 focus:outline-none focus-visible:underline"
+        >
+          Review / Architecture
+        </Link>
+        {me?.public_demo && (
+          <span
+            className="rounded-full bg-sky-50 px-2.5 py-1 text-xs font-semibold text-sky-800 ring-1 ring-inset ring-sky-200"
+            data-testid="public-demo-badge"
+          >
+            Public Demo · Read-only
+          </span>
+        )}
         {me && me.memberships.length > 0 && (
           <label className="flex items-center gap-2 text-sm text-slate-600">
             <span>Tenant</span>
@@ -83,7 +98,9 @@ function Workspace({ onSignOut }: { onSignOut?: () => void }) {
           <span className="flex-1">
             {error.code === "auth_required" || error.code === "auth_invalid"
               ? "Your session is not valid. Sign in again."
-              : `Could not load your workspace: ${error.message}`}
+              : error.code === "public_demo_unavailable" || error.code === "public_demo_disabled"
+                ? "The public demo is not available right now. Try again later or use Reviewer Sign In."
+                : `Could not load your workspace: ${error.message}`}
           </span>
           <button type="button" onClick={() => void load()} className="font-medium underline">
             Retry
@@ -93,8 +110,15 @@ function Workspace({ onSignOut }: { onSignOut?: () => void }) {
       {me && me.memberships.length === 0 && (
         <p className="m-6 text-sm text-slate-600">Your account has no tenant access yet. Ask an administrator to grant a membership.</p>
       )}
-      <main className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col">
-        {tenant && threadId && <ChatPanel key={`${tenant.tenant_id}:${threadId}`} tenant={tenant} threadId={threadId} />}
+      <main className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col">
+        {tenant && threadId && (
+          <ChatPanel
+            key={`${tenant.tenant_id}:${threadId}`}
+            tenant={tenant}
+            threadId={threadId}
+            readOnly={Boolean(me?.public_demo)}
+          />
+        )}
       </main>
     </div>
   );

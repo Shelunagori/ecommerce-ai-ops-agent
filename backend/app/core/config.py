@@ -64,6 +64,16 @@ class Settings(BaseSettings):
     # Abuse protection (Phase 12): chat messages per (user, tenant) per minute; 0 disables.
     agent_rate_limit_per_minute: int = Field(default=20, ge=0, le=1000)
 
+    # Public "Try Live Demo" (Supabase Anonymous Sign-Ins). OFF by default. A VERIFIED
+    # anonymous JWT (``is_anonymous: true``) gets read-only ``member`` access to exactly this
+    # one synthetic tenant; no membership rows are created. Permanent users are unaffected.
+    public_demo_enabled: bool = False
+    public_demo_tenant_slug: str = Field(default="bluepeak-retail", min_length=1, max_length=64)
+    # Stricter budgets for anonymous visitors: per visitor, and shared by ALL visitors (new
+    # anonymous identities are cheap to create, so a per-identity limit alone is not enough).
+    public_demo_rate_limit_per_minute: int = Field(default=5, ge=0, le=1000)
+    public_demo_global_rate_limit_per_minute: int = Field(default=60, ge=0, le=10_000)
+
     # Authentication / tenant boundary (Phase 7).
     #   demo     - X-Tenant-ID header is trusted (LOCAL DEMO ONLY; refused in production)
     #   supabase - Supabase Auth JWT (JWKS: RS256/ES256) + server-side tenant_memberships
