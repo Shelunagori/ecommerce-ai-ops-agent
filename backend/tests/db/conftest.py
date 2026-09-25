@@ -129,6 +129,7 @@ _ACTION_TABLES = (
     "store_credit_transactions",
     "action_requests",
     "tenant_memberships",
+    "public_demo_usage",
 )
 _EXTRA_CLEANUP: list[str] = []  # later phases register their tenant-scoped audit tables here
 

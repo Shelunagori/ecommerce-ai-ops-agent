@@ -26,13 +26,23 @@ class Settings(BaseSettings):
 
     # LLM provider layer (app/agent/llm). Provider-specific values are only read by the
     # provider factory. No network call happens until a model is actually invoked.
-    llm_provider: Literal["ollama", "gemini"] = "ollama"
+    llm_provider: Literal["ollama", "gemini", "cloudflare"] = "ollama"
+    # Optional second provider for ONE model call whose primary call failed for availability
+    # reasons (rate limit / quota, timeout, unavailable) after the primary's own retries.
+    # Must differ from ``llm_provider``. Chat inference only: embeddings are independent.
+    llm_fallback_provider: Literal["ollama", "gemini", "cloudflare"] | None = None
     llm_timeout_seconds: float = Field(default=60.0, ge=1, le=300)  # seconds
     llm_max_retries: int = Field(default=1, ge=0, le=2)  # transient failures only
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3:4b-instruct"
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-3.8-flash"
+    # Cloudflare Workers AI (chat only), OpenAI-compatible endpoint
+    # https://api.cloudflare.com/client/v4/accounts/<account id>/ai/v1. Backend-only secrets:
+    # never NEXT_PUBLIC_*, never logged. The token needs the "Workers AI: Read" permission.
+    cloudflare_account_id: str | None = None
+    cloudflare_api_token: SecretStr | None = None
+    cloudflare_model: str = "@cf/meta/llama-4-scout-17b-16e-instruct"
 
     # Commerce assistant loop bounds (trusted configuration only; never model input).
     assistant_max_model_rounds: int = Field(default=5, ge=1, le=10)
@@ -73,6 +83,9 @@ class Settings(BaseSettings):
     # anonymous identities are cheap to create, so a per-identity limit alone is not enough).
     public_demo_rate_limit_per_minute: int = Field(default=5, ge=0, le=1000)
     public_demo_global_rate_limit_per_minute: int = Field(default=60, ge=0, le=10_000)
+    # Agent messages ONE anonymous visitor (verified JWT subject) may send in total, enforced
+    # durably in PostgreSQL (``public_demo_usage``); a failed run gives its unit back. 0 = off.
+    public_demo_message_budget: int = Field(default=10, ge=0, le=10_000)
 
     # Authentication / tenant boundary (Phase 7).
     #   demo     - X-Tenant-ID header is trusted (LOCAL DEMO ONLY; refused in production)

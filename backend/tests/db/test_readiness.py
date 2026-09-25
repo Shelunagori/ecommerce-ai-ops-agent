@@ -39,7 +39,7 @@ def test_schema_behind_the_code_is_not_ready(api, monkeypatch):
 
 
 def test_head_matches_the_migration_files():
-    assert readiness.migration_head().startswith("0006")
+    assert readiness.migration_head().startswith("0007")
 
 
 def _tables(db_engine):

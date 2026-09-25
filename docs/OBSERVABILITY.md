@@ -9,6 +9,19 @@ chain-of-thought, retrieved policy text, vectors and secrets:
 | `audit_events` | PostgreSQL (migration 0005) | the action lifecycle, written in the SAME transaction as the state change |
 | `agent_runs` | PostgreSQL (migration 0005) | one row per graph run or resume; best effort (never fails a run) |
 
+## Model provider telemetry (chat)
+
+| Log line (`app.agent.llm` / `app.agent.graph`) | Safe fields |
+| --- | --- |
+| `llm call` (one per provider call) | `provider`, `model`, `operation`, `prompt_version`, `outcome` (`ok` / `retrying` / `error`), `attempts`, `duration_ms`, `input_chars`, `error_code`, `error_type` |
+| `llm fallback` (primary failed for availability) | `provider`, `model`, `fallback_provider`, `fallback_model`, `operation`, `error_code` |
+| `graph assistant run` | … plus `model_providers` (provider that answered each model call, in order) and `fallback_calls` |
+
+The per-call provider also reaches the execution trace (`metadata.provider`,
+`metadata.fallback_used`). Never logged: messages, prompts, tool payloads, retrieved text,
+tokens, `Authorization` headers or provider response bodies; HTTP client libraries are held
+at WARNING so request URLs (Cloudflare account id) stay out of the log.
+
 ## Correlation ids
 
 | Id | Where it appears |

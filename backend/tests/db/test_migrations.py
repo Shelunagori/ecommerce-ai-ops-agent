@@ -32,6 +32,7 @@ DOMAIN_TABLES = {
     "agent_runs",  # Step 10 (0005)
     "audit_events",  # Step 10 (0005)
     "tenant_memberships",  # Phase 7 (0006)
+    "public_demo_usage",  # public-demo message budget (0007)
 }
 
 
@@ -79,6 +80,7 @@ ACTION_TABLES = {
     "agent_runs",
     "audit_events",
     "tenant_memberships",
+    "public_demo_usage",
 }
 ECOMMERCE_TABLES = sorted(DOMAIN_TABLES - KNOWLEDGE_TABLES - ACTION_TABLES)
 

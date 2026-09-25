@@ -178,6 +178,13 @@ class GraphNodes:
             )
             return {**update, "pending": None, "error": _error(exc.code, "llm", exc.message)}
         ai: AIMessage = chat.message  # the provider's original message, never rebuilt
+        # The provider that ACTUALLY answered this call (a fallback may have served it).
+        provider = chat.provider or provider
+        fallback_used = bool(chat.fallback_used)
+        update["model_providers"] = [
+            *state.get("model_providers", []),
+            {"round": round_no, "provider": provider, "fallback_used": fallback_used},
+        ]
 
         status = state.get("policy_retrieval_status", "none")
         decision = evaluate_model_turn(
@@ -206,13 +213,15 @@ class GraphNodes:
                 proposal=decision.kind == "action",
                 final=False,
             )
-            events.finish(step, model_step(round_no, provider, detail))
+            events.finish(step, model_step(round_no, provider, detail, fallback_used=fallback_used))
             seen = [*state.get("seen_tool_call_ids", []), *decision.new_call_ids]
             kind = {"retrieve": "retrieval", "action": "action"}.get(decision.kind, "commerce")
             return {**update, "pending": ai, "pending_kind": kind, "seen_tool_call_ids": seen}
         if decision.kind == "answer":
             final_detail = model_detail([], retrieval=False, proposal=False, final=True)
-            events.finish(step, model_step(round_no, provider, final_detail))
+            events.finish(
+                step, model_step(round_no, provider, final_detail, fallback_used=fallback_used)
+            )
             if self._profile.policy_knowledge:
                 sources = {s["citation"]: s for s in state.get("policy_sources", [])}
                 # Reported only where the final trace reports it: after policy retrieval (or
@@ -257,6 +266,7 @@ class GraphNodes:
             f"Model response rejected ({decision.error_code or 'agent_protocol_error'})",
             call=round_no,
             provider=provider,
+            fallback_used=fallback_used or None,
         )
         invalid = [
             *state.get("invalid_tool_calls", []),

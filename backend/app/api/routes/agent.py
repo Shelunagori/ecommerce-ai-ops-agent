@@ -32,7 +32,8 @@ from app.api.agent_runtime import internal_thread_id, runtime_for
 from app.api.deps import CurrentPrincipal, ReadSession, get_app_settings, get_jwt_verifier
 from app.api.ratelimit import charge_message
 from app.api.streaming import stream_run
-from app.auth.errors import PublicDemoReadOnlyError
+from app.auth.demo_budget import PublicDemoBudget
+from app.auth.errors import PublicDemoLimitReachedError, PublicDemoReadOnlyError
 from app.auth.principal import identity_only
 from app.core.request_context import request_id_var
 
@@ -169,6 +170,36 @@ def me(request: Request, session: ReadSession) -> MeOut:
     )
 
 
+def _demo_budget(app: Any) -> PublicDemoBudget:
+    budget = getattr(app.state, "public_demo_budget", None)
+    if budget is None:
+        budget = PublicDemoBudget()
+        app.state.public_demo_budget = budget
+    return budget
+
+
+def _reserve_demo_message(request: Request, principal: Any) -> bool:
+    """Anonymous public-demo visitors: claim one message of their durable budget (verified
+    subject, server-side). True when a unit was claimed (give it back if the run fails)."""
+    if not getattr(principal, "public_demo", False):
+        return False  # reviewer accounts are never budgeted here
+    limit = request.app.state.settings.public_demo_message_budget
+    if limit <= 0:
+        return False
+    if not _demo_budget(request.app).reserve(principal.subject, limit):
+        raise PublicDemoLimitReachedError()
+    return True
+
+
+def _run_counted(request: Request, principal: Any, reserved: bool, run: Any) -> Any:
+    try:
+        return run()
+    except Exception:
+        if reserved:  # the message did not complete: it does not count against the budget
+            _demo_budget(request.app).release(principal.subject)
+        raise
+
+
 @router.post("/agent/messages", response_model=AgentResponse)
 def post_message(body: MessageIn, principal: CurrentPrincipal, request: Request) -> AgentResponse:
     # Before any model call: one user cannot exhaust the hosted model budget.
@@ -177,7 +208,13 @@ def post_message(body: MessageIn, principal: CurrentPrincipal, request: Request)
     assistant = runtime.assistant_for(principal)  # read-only graph for the public demo
     context = _context(principal, request)
     thread = internal_thread_id(principal.subject, body.thread_id)
-    result = assistant.run(body.text, context, thread_id=thread)
+    reserved = _reserve_demo_message(request, principal)
+    result = _run_counted(
+        request,
+        principal,
+        reserved,
+        lambda: assistant.run(body.text, context, thread_id=thread),
+    )
     return _response(body.thread_id, result)
 
 
@@ -203,9 +240,16 @@ async def stream_message(
     assistant = runtime.assistant_for(principal)  # read-only graph for the public demo
     context = _context(principal, request)
     thread = internal_thread_id(principal.subject, body.thread_id)
+    # Before streaming, so an exhausted demo budget is a normal JSON 429.
+    reserved = await run_in_threadpool(_reserve_demo_message, request, principal)
 
     def work(events: RunEmitter) -> AgentResponse:
-        result = assistant.run(body.text, context, thread_id=thread, events=events)
+        result = _run_counted(
+            request,
+            principal,
+            reserved,
+            lambda: assistant.run(body.text, context, thread_id=thread, events=events),
+        )
         return _response(body.thread_id, result)
 
     return stream_run(work)

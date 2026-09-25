@@ -41,6 +41,7 @@ CHECKPOINT_TABLES = (
     "checkpoint_migrations",
 )
 ACTION_TABLES = (
+    "public_demo_usage",
     "audit_events",
     "agent_runs",
     "store_credit_transactions",

@@ -138,3 +138,49 @@ def test_check_env_script(monkeypatch, capsys):
     monkeypatch.setenv("APP_ENV", "nonsense")
     assert check_env.main([]) == 1
     assert "APP_ENV" in capsys.readouterr().err
+
+
+# --- Cloudflare Workers AI primary / fallback (chat only) --------------------------------------
+CF_OK = {
+    "llm_provider": "cloudflare",
+    "cloudflare_account_id": "0123456789abcdef0123456789abcdef",
+    "cloudflare_api_token": "cf-NEVER-PRINT-ME",
+}
+
+
+def test_cloudflare_primary_with_gemini_fallback_and_gemini_embeddings_is_valid():
+    assert configuration_problems(prod(**CF_OK, llm_fallback_provider="gemini")) == []
+    assert configuration_problems(prod(**CF_OK)) == []  # no fallback: also fine
+
+
+@pytest.mark.parametrize(
+    ("over", "problem"),
+    [
+        ({"cloudflare_account_id": None}, "CLOUDFLARE_ACCOUNT_ID:missing_or_invalid"),
+        ({"cloudflare_account_id": "abc"}, "CLOUDFLARE_ACCOUNT_ID:missing_or_invalid"),
+        ({"cloudflare_api_token": None}, "CLOUDFLARE_API_TOKEN:missing"),
+        ({"cloudflare_api_token": "  "}, "CLOUDFLARE_API_TOKEN:missing"),
+        ({"cloudflare_model": " "}, "CLOUDFLARE_MODEL:missing"),
+        ({"llm_fallback_provider": "ollama"}, "LLM_FALLBACK_PROVIDER:must_be_hosted"),
+        ({"llm_fallback_provider": "cloudflare"}, "LLM_FALLBACK_PROVIDER:must_differ_from_primary"),
+    ],
+)
+def test_cloudflare_requirements(over, problem):
+    problems = configuration_problems(prod(**{**CF_OK, **over}))
+    assert problem in problems and len(problems) == 1
+    assert "cf-NEVER-PRINT-ME" not in " ".join(problems)
+
+
+def test_gemini_key_is_required_by_a_gemini_fallback_or_embeddings_only():
+    # Cloudflare chat + Gemini embeddings: the Gemini key is still needed (embeddings)
+    assert "GEMINI_API_KEY:missing" in configuration_problems(prod(**CF_OK, gemini_api_key=None))
+    # Cloudflare chat with a Gemini fallback: needed as well
+    assert "GEMINI_API_KEY:missing" in configuration_problems(
+        prod(**CF_OK, llm_fallback_provider="gemini", gemini_api_key=None)
+    )
+
+
+def test_gemini_primary_needs_no_cloudflare_settings():
+    assert configuration_problems(prod(llm_provider="gemini")) == []
+    fallback_cf = prod(llm_provider="gemini", llm_fallback_provider="cloudflare")
+    assert "CLOUDFLARE_API_TOKEN:missing" in configuration_problems(fallback_cf)

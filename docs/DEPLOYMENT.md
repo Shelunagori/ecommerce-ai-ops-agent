@@ -40,19 +40,58 @@ flowchart LR
 | `PUBLIC_DEMO_TENANT_SLUG` | no | default `bluepeak-retail`; must exist or demo requests fail with 503 |
 | `PUBLIC_DEMO_RATE_LIMIT_PER_MINUTE`, `PUBLIC_DEMO_GLOBAL_RATE_LIMIT_PER_MINUTE` | no | per anonymous visitor (default 5) and shared by all visitors (default 60) |
 | `CORS_ORIGINS` | yes | the exact Vercel origin(s), `https://…`, comma-separated |
-| `LLM_PROVIDER` | yes | `gemini` |
-| `GEMINI_API_KEY` | yes | secret |
+| `PUBLIC_DEMO_MESSAGE_BUDGET` | no | agent messages per anonymous visitor in total (default 10, `0` = off), durable in PostgreSQL |
+| `LLM_PROVIDER` | yes | `cloudflare` (recommended) or `gemini` — chat / tool-calling model only |
+| `LLM_FALLBACK_PROVIDER` | no | `gemini` (recommended with Cloudflare); must differ from `LLM_PROVIDER` |
+| `CLOUDFLARE_ACCOUNT_ID` | when Cloudflare is primary or fallback | 32-hex account id (config; keep it private) |
+| `CLOUDFLARE_API_TOKEN` | when Cloudflare is primary or fallback | **secret** — API token with *Workers AI: Read* |
+| `CLOUDFLARE_MODEL` | no | default `@cf/meta/llama-4-scout-17b-16e-instruct` (must support function calling) |
+| `GEMINI_API_KEY` | yes (embeddings; and Gemini chat primary/fallback) | **secret** |
 | `GEMINI_MODEL` | no | default in `app/core/config.py` |
-| `EMBEDDING_PROVIDER` | yes | `gemini` |
+| `EMBEDDING_PROVIDER` | yes | `gemini` — unchanged by the chat provider choice |
 | `GEMINI_EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | no | defaults `gemini-embedding-2`, `768` |
 | `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` | no | tracing is OFF by default |
 | `PORT` | injected by Railway | the container listens on it |
 
 `APP_ENV=production` refuses to start (and `scripts.check_env` fails) unless every
 "required" row is satisfied: `DATABASE_URL` set, `DEBUG=false`, `AUTH_MODE=supabase` with an
-https `SUPABASE_URL`, explicit https `CORS_ORIGINS` (no `*`), hosted chat and embedding
-providers with `GEMINI_API_KEY`, and a LangSmith key if tracing is on. Only setting NAMES are
-printed, never values.
+https `SUPABASE_URL`, explicit https `CORS_ORIGINS` (no `*`), a hosted chat provider
+(`gemini` or `cloudflare`, and a hosted fallback if one is set), `CLOUDFLARE_ACCOUNT_ID` +
+`CLOUDFLARE_API_TOKEN` when Cloudflare is used, `GEMINI_API_KEY` when Gemini is used for chat
+or embeddings, and a LangSmith key if tracing is on. Only setting NAMES are printed, never
+values.
+
+### Chat provider: Cloudflare Workers AI primary, Gemini fallback
+
+The LLM provider and the embedding provider are **independent**. The recommended
+production setup changes only chat inference:
+
+```
+LLM_PROVIDER=cloudflare
+LLM_FALLBACK_PROVIDER=gemini
+CLOUDFLARE_ACCOUNT_ID=<config: 32-hex account id>
+CLOUDFLARE_API_TOKEN=<SECRET: token with Workers AI Read>
+CLOUDFLARE_MODEL=@cf/meta/llama-4-scout-17b-16e-instruct
+GEMINI_API_KEY=<SECRET: existing key — fallback chat + embeddings>
+
+# unchanged — the stored pgvector embeddings stay valid, no re-embedding:
+EMBEDDING_PROVIDER=gemini
+GEMINI_EMBEDDING_MODEL=gemini-embedding-2
+EMBEDDING_DIMENSIONS=768
+```
+
+* The Railway API calls `https://api.cloudflare.com/client/v4/accounts/<id>/ai/v1/chat/completions`
+  (OpenAI-compatible, tools + `tool_calls`) directly; no Cloudflare Worker is deployed. The
+  token never reaches Vercel or the browser — do **not** create `NEXT_PUBLIC_` variables for it.
+* Create the token in the Cloudflare dashboard → *My Profile → API Tokens → Create Token →
+  Workers AI (template)* (permission *Workers AI: Read*), scoped to this account only.
+* Fallback is per model call: only a rate-limited / quota-exhausted, timed-out or
+  unavailable Cloudflare call (after `LLM_MAX_RETRIES`) is re-sent to Gemini with the same
+  history; tools, retrieval and approved actions are never re-run. Provider auth errors do
+  **not** fall back (a wrong token must be fixed, not hidden).
+* Switching the chat model needs no data migration. `CLOUDFLARE_MODEL` must be a Workers AI
+  text-generation model with function calling; verify a new model with the opt-in live test
+  (`RUN_CLOUDFLARE_INTEGRATION=1`, see `docs/DEVELOPMENT.md`).
 
 ### Vercel (frontend) — public, inlined at build time
 

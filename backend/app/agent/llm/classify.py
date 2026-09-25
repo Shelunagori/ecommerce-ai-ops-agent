@@ -1,7 +1,8 @@
 """Map provider/framework exceptions to typed, safe LLM errors.
 
-Order matters: LangChain's normalised ``ModelError`` hierarchy first (the Gemini
-integration raises these), then provider SDK errors, then transport errors.
+Order matters: LangChain's normalised ``ModelError`` hierarchy first (the Gemini and
+OpenAI-compatible integrations raise these), then provider SDK errors, then transport errors.
+The raw provider message / body is never copied into the safe error.
 """
 
 import json
@@ -41,6 +42,10 @@ try:
     from google.genai.errors import APIError as GoogleAPIError
 except ImportError:  # pragma: no cover
     GoogleAPIError = None  # type: ignore[assignment,misc]
+try:  # OpenAI-compatible SDK (Cloudflare Workers AI chat)
+    import openai as _openai
+except ImportError:  # pragma: no cover
+    _openai = None  # type: ignore[assignment]
 
 
 def _model_not_found(provider: str | None, model: str | None) -> LLMConfigurationError:
@@ -58,6 +63,12 @@ def _by_status(status: int | None, provider: str | None, model: str | None) -> L
         return _model_not_found(provider, model)
     if status == 408:
         return LLMTimeoutError()
+    if status == 402:  # e.g. a hosted plan's quota / credits are used up
+        return LLMUnavailableError(
+            "The language model provider's usage quota is exhausted.",
+            code="llm_quota_exceeded",
+            retryable=False,
+        )
     if status == 429:
         return LLMUnavailableError(
             "The language model provider is rate limiting requests.", code="llm_rate_limited"
@@ -106,6 +117,12 @@ def _classify(exc: BaseException, provider: str | None, model: str | None) -> LL
         return _by_status(getattr(exc, "code", None), provider, model)
     if isinstance(exc, httpx.HTTPStatusError):
         return _by_status(exc.response.status_code, provider, model)
+    if _openai is not None and isinstance(exc, _openai.APIStatusError):
+        return _by_status(exc.status_code, provider, model)
+    if _openai is not None and isinstance(exc, _openai.APITimeoutError):
+        return LLMTimeoutError()
+    if _openai is not None and isinstance(exc, _openai.APIConnectionError):
+        return LLMUnavailableError()
     # Transport.
     if isinstance(exc, (httpx.TimeoutException, TimeoutError, socket.timeout)):
         return LLMTimeoutError()

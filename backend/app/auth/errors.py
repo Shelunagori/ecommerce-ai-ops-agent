@@ -51,3 +51,9 @@ class PublicDemoReadOnlyError(AppError):
     status_code = 403
     code = "public_demo_read_only"
     message = "The public demo is read-only. Sign in with a reviewer account to use actions."
+
+
+class PublicDemoLimitReachedError(AppError):
+    status_code = 429
+    code = "public_demo_limit_reached"
+    message = "Public demo limit reached. Please start a reviewer session or try again later."

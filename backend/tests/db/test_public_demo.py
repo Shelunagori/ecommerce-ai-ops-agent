@@ -289,3 +289,84 @@ def test_public_demo_principal_never_has_approval_or_action_capability():
     assert (p.can_approve, p.can_use_actions) == (False, False)
     permanent = Principal("u", "supabase", TenantContext(tenant), "approver", (membership,))
     assert (permanent.can_approve, permanent.can_use_actions) == (True, True)
+
+
+# --- durable per-visitor message budget ---------------------------------------------------------
+LIMIT_MESSAGE = "Public demo limit reached. Please start a reviewer session or try again later."
+
+
+def budgeted(committed, limit):
+    harness = Harness(committed, public_demo_message_budget=limit)
+    harness.app.state.public_demo_rate_limiter = RateLimiter(1000)
+    harness.app.state.public_demo_global_rate_limiter = RateLimiter(1000)
+    return harness
+
+
+def test_anonymous_visitor_has_a_durable_message_budget(committed, tenant_b, demo):
+    """(`demo` inserts the permanent reviewer's memberships.)"""
+    demo = budgeted(committed, 2)
+    demo.script(*(ai_text(f"a{i}") for i in range(10)))
+    assert demo.post(h(token(ANON)), "1").status_code == 200
+    assert demo.post(h(token(ANON)), "2", thread="t2").status_code == 200  # new thread: same budget
+    r = demo.post(h(token(ANON)), "3", thread="t3")
+    assert (r.status_code, r.json()["error"]["code"]) == (429, "public_demo_limit_reached")
+    assert r.json()["error"]["message"] == LIMIT_MESSAGE
+    # the streaming endpoint is refused BEFORE streaming, with the same JSON error
+    s = demo.client.post(
+        "/api/agent/messages/stream", json={"text": "4", "thread_id": "t4"}, headers=h(token(ANON))
+    )
+    assert s.status_code == 429 and s.headers["content-type"].startswith("application/json")
+    # durable: a brand-new app instance (restart / second replica) still refuses this visitor
+    again = budgeted(committed, 2)
+    again.script(ai_text("x"))
+    assert again.post(h(token(ANON)), "5", thread="t5").status_code == 429
+    # another anonymous visitor has their own budget; a reviewer is never budgeted
+    assert again.post(h(token(ANON_2)), "6").status_code == 200
+    reviewer = demo.post(h(token(PERMANENT, anonymous=False), tenant_b), "7", thread="r")
+    assert reviewer.status_code == 200
+
+
+def test_a_failed_run_gives_its_budget_unit_back(committed):
+    from app.agent.llm.errors import LLMUnavailableError
+
+    demo = budgeted(committed, 1)
+    demo.script(LLMUnavailableError(), LLMUnavailableError(), ai_text("recovered"))
+    failed = demo.post(h(token(ANON)), "1")
+    assert failed.status_code == 503  # the model call failed: it does not count
+    assert demo.post(h(token(ANON)), "2", thread="t2").status_code == 200
+    assert demo.post(h(token(ANON)), "3", thread="t3").status_code == 429
+
+
+def test_budget_is_keyed_by_the_verified_subject_only(committed):
+    demo = budgeted(committed, 1)
+    demo.script(*(ai_text(f"a{i}") for i in range(5)))
+    assert demo.post(h(token(ANON)), "1").status_code == 200
+    forged = h(token(ANON), **{"X-Demo-Budget": "0", "X-Anonymous-Id": str(uuid.uuid4())})
+    assert demo.post(forged, "2", thread="t2").status_code == 429
+    with committed() as session:
+        stored = session.execute(text("SELECT subject_hash, messages FROM public_demo_usage")).all()
+    assert [m for _, m in stored] == [1] and ANON not in stored[0][0]  # digest, not the subject
+
+
+def test_concurrent_reservations_cannot_overshoot_the_limit(committed):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.auth.demo_budget import PublicDemoBudget
+
+    budget = PublicDemoBudget(committed)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: budget.reserve("visitor-x", 3), range(12)))
+    assert results.count(True) == 3 and budget.used("visitor-x") == 3
+    budget.release("visitor-x")
+    assert budget.used("visitor-x") == 2
+    assert budget.reserve("anyone", 0) is True  # 0 = budget disabled
+
+
+def test_reviewer_accounts_are_never_budgeted(committed, tenant_b, demo):
+    harness = budgeted(committed, 1)
+    harness.script(*(ai_text(f"r{i}") for i in range(4)))
+    reviewer = h(token(PERMANENT, anonymous=False), tenant_b)
+    for i in range(3):  # three messages with a budget of one
+        assert harness.post(reviewer, str(i), thread=f"r{i}").status_code == 200
+    with committed() as session:
+        assert session.execute(text("SELECT count(*) FROM public_demo_usage")).scalar() == 0

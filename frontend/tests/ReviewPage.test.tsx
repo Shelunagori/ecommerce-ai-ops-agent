@@ -17,7 +17,7 @@ describe("/review (public, no auth)", () => {
     expect(screen.getByRole("link", { name: "Open Application" })).toHaveAttribute("href", "/");
     expect(screen.getAllByRole("link", { name: "View GitHub" })[0]).toHaveAttribute("href", REPO_URL);
     const diagram = screen.getByTestId("architecture-diagram");
-    for (const text of ["LangGraph orchestration", "Supabase Auth", "Gemini", "Approval-gated actions", "LangGraph checkpoints"]) {
+    for (const text of ["LangGraph orchestration", "Supabase Auth", "LLM provider layer", "Approval-gated actions", "LangGraph checkpoints"]) {
       expect(within(diagram).getByText(text)).toBeInTheDocument();
     }
   });

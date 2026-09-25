@@ -4,6 +4,7 @@ from app.models.action import ActionRequest, StoreCreditTransaction
 from app.models.audit import AgentRun, AuditEvent
 from app.models.base import Base
 from app.models.customer import Customer
+from app.models.demo import PublicDemoUsage
 from app.models.invoice import Invoice
 from app.models.knowledge import KnowledgeChunk, KnowledgeChunkEmbedding, KnowledgeDocument
 from app.models.membership import TenantMembership
@@ -25,6 +26,7 @@ __all__ = [
     "Order",
     "OrderItem",
     "Product",
+    "PublicDemoUsage",
     "Shipment",
     "StoreCreditTransaction",
     "Tenant",

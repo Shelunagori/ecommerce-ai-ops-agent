@@ -47,3 +47,7 @@ def configure_logging(debug: bool = False) -> None:
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(logging.DEBUG if debug else logging.INFO)
+    # HTTP client libraries log full request URLs at INFO (a hosted provider's URL can carry
+    # an account id); the app logs its own safe per-call line instead.
+    for noisy in ("httpx", "httpcore", "openai", "google_genai"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)

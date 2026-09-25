@@ -65,7 +65,11 @@ export default function ArchitectureDiagram() {
         <Down />
         <div className="grid gap-2 sm:grid-cols-[1fr_12rem] sm:items-center">
           <Node title="LangGraph orchestration" sub="MODEL · TOOLS · RETRIEVE · PROPOSE · APPROVAL · EXECUTE" authority="deterministic" />
-          <Node title="Gemini" sub="chat + embeddings (Ollama locally)" authority="model" />
+          <Node
+            title="LLM provider layer"
+            sub="Cloudflare Workers AI primary · Gemini fallback per model call (Ollama locally)"
+            authority="model"
+          />
         </div>
         <Down />
         <div className="grid gap-2 md:grid-cols-3">
@@ -84,7 +88,7 @@ export default function ArchitectureDiagram() {
       <Group label="Supabase · PostgreSQL + pgvector">
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
           <Node title="Commerce tables" sub="composite tenant FKs" />
-          <Node title="Policy chunks + vectors" sub="pgvector, per model profile" />
+          <Node title="Policy chunks + vectors" sub="pgvector; Gemini embeddings (separate from chat)" />
           <Node title="Actions + audit events" sub="idempotency keys, same transaction" />
           <Node title="LangGraph checkpoints" sub="durable pause / resume" />
         </div>

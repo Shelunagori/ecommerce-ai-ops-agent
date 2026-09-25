@@ -95,6 +95,23 @@ conversation history.
 * The public demo's stream shows only its real read-only path: no action capability, no
   proposal, no approval events.
 
+## Hosted chat providers (Cloudflare Workers AI, Gemini)
+
+* `CLOUDFLARE_API_TOKEN` / `GEMINI_API_KEY` are backend-only `SecretStr` settings, passed
+  explicitly to the clients, never read from the browser build (no `NEXT_PUBLIC_*`), never
+  logged, never echoed in errors (tests assert the token appears in no exception, result or
+  log line). HTTP client libraries (`httpx`, `openai`, `google_genai`) log at WARNING only, so
+  request URLs (which contain the Cloudflare account id) are not written to the app log.
+* The browser never calls Workers AI; the provider receives only prompts, the synthetic
+  conversation and tool schemas — never database credentials, tenant ids or SQL (tool
+  schemas are asserted free of `tenant`, `runtime` and SQL terms).
+* Provider failures map to the safe error taxonomy; raw provider bodies never reach users.
+  Fallback is limited to availability errors at the model-call boundary and cannot replay a
+  tool or an action (tests: `tests/db/test_provider_fallback_graph.py`).
+* Public demo: in addition to the per-minute limits, each verified anonymous visitor has a
+  durable message budget (`PUBLIC_DEMO_MESSAGE_BUDGET`, default 10) keyed by a digest of the
+  JWT subject; browser-supplied counters or headers are ignored.
+
 ## Verification
 
 | Check | Result |
@@ -117,5 +134,7 @@ conversation history.
   pruned automatically (P25).
 * Streaming: an abandoned read-only run still finishes and spends model budget (P28); live
   SSE through the hosted proxies is verified locally only (P26).
+* Cloudflare Workers AI tool-calling quality with the chosen model is unmeasured (P30); a new
+  anonymous session gets a fresh demo budget (P31).
 * `arguments_hash` is optional on approve at the API level (the UI always sends it; arguments
   are immutable after proposal) **(V)**.

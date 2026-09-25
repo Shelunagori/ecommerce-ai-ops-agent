@@ -266,7 +266,7 @@ export default function ReviewPage() {
           title="Deployment topology"
           lead="A push to main runs GitHub Actions CI while Railway and Vercel deploy through their native Git integrations."
         >
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {DEPLOYMENT.map((d) => (
               <Card key={d.name} title={d.name} body={d.role} />
             ))}

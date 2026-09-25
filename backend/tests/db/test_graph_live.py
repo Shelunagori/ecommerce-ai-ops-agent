@@ -1,7 +1,8 @@
 """OPT-IN live LangGraph smoke test (compatibility, not model quality).
 
-    RUN_OLLAMA_INTEGRATION=1 (default model qwen3:4b-instruct) / RUN_GEMINI_INTEGRATION=1
-    plus TEST_DATABASE_URL.
+    RUN_OLLAMA_INTEGRATION=1 (default model qwen3:4b-instruct) / RUN_GEMINI_INTEGRATION=1 /
+    RUN_CLOUDFLARE_INTEGRATION=1 (CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN, optional
+    CLOUDFLARE_MODEL) plus TEST_DATABASE_URL.
 
 Checks the real model requests a PARSED tool call, the real tool runs against the synthetic
 test database, the graph loops back to the model and ends with a non-empty answer that
@@ -32,6 +33,13 @@ PROVIDERS = [
         "gemini",
         marks=pytest.mark.skipif(
             os.getenv("RUN_GEMINI_INTEGRATION") != "1", reason="set RUN_GEMINI_INTEGRATION=1"
+        ),
+    ),
+    pytest.param(
+        "cloudflare",
+        marks=pytest.mark.skipif(
+            os.getenv("RUN_CLOUDFLARE_INTEGRATION") != "1",
+            reason="set RUN_CLOUDFLARE_INTEGRATION=1",
         ),
     ),
 ]

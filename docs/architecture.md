@@ -1179,6 +1179,50 @@ Browser ──POST /api/agent/messages/stream (fetch + ReadableStream)──▶ 
   `prefers-reduced-motion`; statuses are also text (`sr-only`) and announced via `role=status`
   (failures `role=alert`). Auto-follows the active step unless the reader scrolled up.
 
+## Chat providers: Cloudflare Workers AI primary, Gemini fallback
+
+```
+MODEL node ──invoke_chat──▶ FallbackProvider
+                              ├─ primary : ChatModelProvider(ChatOpenAI → Workers AI /ai/v1)
+                              │            RetryPolicy (transient only, LLM_MAX_RETRIES)
+                              └─ fallback: ChatModelProvider(ChatGoogleGenerativeAI)   (optional)
+Embeddings (RETRIEVE) ─────▶ unchanged embedding profile (Gemini) → pgvector
+```
+
+* **Provider abstraction kept.** Cloudflare is one more `ChatModelProvider` built in
+  `factory.py` (`LLM_PROVIDER=cloudflare`): LangChain's `ChatOpenAI` against Workers AI's
+  OpenAI-compatible Chat Completions endpoint (`tools` → structured `tool_calls` with their
+  ids; SDK retries off, our `RetryPolicy` owns them). No Cloudflare Worker is deployed; the
+  Railway API calls Workers AI directly with a backend-only token.
+* **History normalisation** (provider layer only): before a Cloudflare call, assistant turns
+  are reduced to text + tool calls (another provider's content blocks / thought signatures
+  are dropped for that request; the checkpointed history is unchanged, ids preserved).
+  Gemini (langchain-google-genai 4.4) already accepts foreign turns by marking them with the
+  documented `skip_thought_signature_validator` sentinel.
+* **Structured output.** Workers AI's JSON mode covers only some models, so for Cloudflare
+  `invoke_structured` uses one forced tool call (`tool_choice="required"`) whose arguments are
+  re-validated with the strict Pydantic schema (same `llm_output_invalid` on violation).
+  The agent graph itself uses tool calling only.
+* **Fallback algorithm** (`FallbackProvider`, `LLM_FALLBACK_PROVIDER`): for ONE model call,
+  primary (with its retries) → on `llm_rate_limited` / `llm_quota_exceeded` / `llm_unavailable`
+  / `llm_timeout` only → the fallback gets the SAME messages and tools and answers THAT call;
+  the graph continues. Never on `llm_output_invalid`, `llm_request_rejected`, auth /
+  configuration errors, nor on anything decided after the call (tool-call protocol checks,
+  textual pseudo tool calls, grounding, tenant scope, approvals, action rules). Tools,
+  retrieval, proposals and executions run in graph nodes outside the model call, so a fallback
+  cannot replay them; resumed approvals execute without a model call at all.
+* **Honest attribution.** `ChatResult.provider/fallback_used` → per-round state
+  `model_providers` → the live and final trace (`metadata.provider`, `fallback_used: true`) →
+  badges "Cloudflare Workers AI" / "Gemini" (+ "Provider fallback"). Run logs gain
+  `model_providers` and `fallback_calls`; the provider layer logs `llm fallback` with
+  provider, fallback provider, operation and the safe error code only.
+* **Embeddings are independent.** `EMBEDDING_PROVIDER`, the embedding profile, dimensions and
+  the stored `knowledge_chunk_embeddings` rows are untouched; no re-embedding.
+* **Public-demo message budget.** `public_demo_usage` (migration 0007): one row per verified
+  anonymous subject (SHA-256 digest), claimed with one conditional `UPDATE … WHERE messages
+  < limit` before the run, given back if the run fails. Durable across restarts/replicas,
+  no Redis. Reviewer accounts are never budgeted. Exhausted → 429 `public_demo_limit_reached`.
+
 ## Open items
 
 Known follow-ups are tracked in [pending-items.md](pending-items.md).

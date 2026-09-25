@@ -561,6 +561,11 @@ class CommerceGraphAssistant:
             "final_citation_count": len(values.get("citations", [])),
             "retrieved_documents": _retrieved_documents(values),
             "action_proposals": len(values.get("action_calls", [])),
+            # which provider answered each model call; >0 fallback_calls = fallback served
+            "model_providers": [m.get("provider") for m in values.get("model_providers", [])],
+            "fallback_calls": sum(
+                1 for m in values.get("model_providers", []) if m.get("fallback_used")
+            ),
             "outcome": outcome,
             "duration_ms": round((time.perf_counter() - started) * 1000, 1),
         }

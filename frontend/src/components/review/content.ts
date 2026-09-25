@@ -119,7 +119,8 @@ export const DECISIONS = [
   { title: "SQL tools for facts, RAG for policy", body: "Exact, changing, tenant-scoped facts are queried; prose rules are retrieved and cited." },
   { title: "Modular monolith", body: "One FastAPI service and one PostgreSQL: no fake microservices, queues or Redis without a measured need." },
   { title: "Durable checkpoints for approvals", body: "A pending approval survives restarts and can be resumed by any API instance." },
-  { title: "Provider abstraction", body: "Ollama locally, Gemini hosted; each embedding model is a separate profile — vectors never mix." },
+  { title: "Provider abstraction", body: "Chat: Cloudflare Workers AI primary with Gemini as fallback (Ollama locally). Embeddings are a separate, unchanged Gemini profile — vectors never mix." },
+  { title: "Fallback at the model-call boundary", body: "Only a rate-limited, timed-out or unavailable model CALL is retried on the fallback, with the same history. Tools, retrieval and approved actions are never replayed; the trace names the provider that answered." },
   { title: "Explicit capability boundaries", body: "After retrieval no commerce tool runs; the model can only propose writes; the public demo gets none." },
   { title: "Honest observability", body: "The execution trace is streamed live from real graph execution (SSE over POST) — safe metadata only, never reasoning or prompts." },
 ];
@@ -128,6 +129,7 @@ export const DEPLOYMENT = [
   { name: "Vercel", role: "Next.js frontend" },
   { name: "Railway", role: "FastAPI container (pre-deploy: config check, migrations, checkpoints)" },
   { name: "Supabase", role: "PostgreSQL + pgvector + Auth (incl. anonymous demo sessions)" },
-  { name: "Gemini", role: "Chat model + embeddings (synthetic data only)" },
+  { name: "Cloudflare Workers AI", role: "Primary chat model, called from the API only (synthetic data only)" },
+  { name: "Gemini", role: "Chat fallback + policy embeddings (synthetic data only)" },
   { name: "GitHub Actions", role: "CI: backend, frontend, e2e, security" },
 ];

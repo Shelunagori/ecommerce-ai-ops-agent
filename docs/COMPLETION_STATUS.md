@@ -485,3 +485,48 @@ deployments. Decisions marked **(V)** are the implementer's and can be vetoed.
   duration" mutation); security X1–X14 re-run on the new tree (X11 now covers both chat
   endpoints; X6 is also caught by the new stream role tests).
 - **Manual / not verified here:** SSE through Railway + Vercel (P26); live Gemini/Supabase.
+
+## Cloudflare Workers AI chat provider + Gemini fallback
+
+**Status:** complete locally. Nothing committed or deployed by the assistant. Embeddings not
+migrated.
+
+- **Provider:** `LLM_PROVIDER=cloudflare` → `ChatModelProvider(ChatOpenAI)` against
+  `https://api.cloudflare.com/client/v4/accounts/<id>/ai/v1` (OpenAI-compatible Chat
+  Completions; tools → structured `tool_calls`, ids preserved). New pinned dependency
+  `langchain-openai==1.6.6` (adds `openai`, `tiktoken`, `jiter`, `regex`; no existing version
+  changed). SDK retries off; `RetryPolicy` unchanged. History normalised per request (text +
+  tool calls). Structured output for Cloudflare = one forced tool call + strict Pydantic.
+- **Model (V):** default `@cf/meta/llama-4-scout-17b-16e-instruct` (function calling, 131K
+  context, no thinking mode); configurable via `CLOUDFLARE_MODEL`.
+- **Fallback:** `LLM_FALLBACK_PROVIDER` → `FallbackProvider` per model call; codes
+  `llm_rate_limited`, `llm_quota_exceeded` (new, HTTP 402), `llm_unavailable`, `llm_timeout`
+  only. Per-round `model_providers` in graph state → trace `provider` / `fallback_used`, run log
+  `model_providers` / `fallback_calls`, provider log `llm fallback`.
+- **Config / production:** `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_MODEL`;
+  production requires them only when Cloudflare is primary or fallback, a hosted fallback that
+  differs from the primary, and `GEMINI_API_KEY` when Gemini serves chat or embeddings.
+- **Public demo:** durable per-visitor message budget (`public_demo_usage`, migration 0007,
+  `PUBLIC_DEMO_MESSAGE_BUDGET=10`), atomic conditional UPDATE, released on failure, reviewers
+  exempt; 429 `public_demo_limit_reached` (JSON, also before a stream starts).
+- **Frontend:** badge "Cloudflare Workers AI" (+ "Provider fallback"), short safe messages for
+  `llm_*` and `public_demo_limit_reached`; `/review` architecture shows the provider layer.
+- **Contract changes (documented):** model trace steps may carry `fallback_used: true`;
+  `ChatResult` / `StructuredResult` gain `provider`, `model`, `fallback_used`; graph state gains
+  per-run `model_providers`; httpx/openai/google_genai loggers at WARNING.
+- **Tests added (90 + 2 opt-in):** `tests/llm/test_cloudflare_provider.py` (37),
+  `tests/llm/test_fallback_provider.py` (22), `tests/db/test_provider_fallback_graph.py` (16),
+  `tests/db/test_public_demo.py` (+5), `tests/test_production.py` (+10); opt-in
+  `tests/llm/test_cloudflare_live.py` and a `cloudflare` case in `tests/db/test_graph_live.py`;
+  frontend `providerBadges.test.tsx` (5).
+- **Results (2026-09-25, measured this iteration):** backend **1479 passed, 24 skipped**
+  (baseline 1389/22), no-DB 838 passed; `ruff`, `ruff format`, `uv lock --check`,
+  `alembic upgrade head` + `alembic check` clean; frontend lint/typecheck clean, **85** unit
+  tests (baseline 80), build OK; Playwright **20/20** dev and production build; gitleaks
+  (history + source dirs) clean; pip-audit, `npm audit` clean; actionlint clean.
+- **Mutations (all red, restored):** C1–C15 (fallback scope, attribution, classification, SDK
+  retries, secret leakage, history normalisation, structured validation, demo budget,
+  production config; C12 first stayed green → added a reviewer-exemption test), FC1–FC3
+  (frontend badges/messages), live trace L1–L15, security X1–X14.
+- **Manual / not verified here:** a live Cloudflare call (no credentials in the sandbox; opt-in
+  tests provided, P30); Railway variables.

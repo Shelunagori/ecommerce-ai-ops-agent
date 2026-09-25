@@ -10,7 +10,10 @@ pre-deploy step. Nothing here makes a network call or reads a secret's value bey
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlparse
+
+from pydantic import SecretStr
 
 from app.core.config import Settings
 
@@ -18,6 +21,10 @@ from app.core.config import Settings
 def _https(url: str | None) -> bool:
     parsed = urlparse(url or "")
     return parsed.scheme == "https" and bool(parsed.netloc)
+
+
+def _set(secret: SecretStr | None) -> bool:
+    return secret is not None and bool(secret.get_secret_value().strip())
 
 
 def configuration_problems(settings: Settings) -> list[str]:
@@ -39,15 +46,30 @@ def configuration_problems(settings: Settings) -> list[str]:
         problems.append("CORS_ORIGINS:missing")
     elif any(o == "*" or not _https(o) for o in settings.cors_origins):
         problems.append("CORS_ORIGINS:must_be_explicit_https")
-    # Hosted inference: there is no local Ollama server next to a hosted API.
-    if settings.llm_provider != "gemini":
+    # Hosted inference: there is no local Ollama server next to a hosted API. The chat
+    # provider (+ optional fallback) and the embedding provider are configured independently.
+    hosted_chat = ("gemini", "cloudflare")
+    if settings.llm_provider not in hosted_chat:
         problems.append("LLM_PROVIDER:must_be_hosted")
+    fallback = settings.llm_fallback_provider
+    if fallback is not None and fallback not in hosted_chat:
+        problems.append("LLM_FALLBACK_PROVIDER:must_be_hosted")
+    if fallback is not None and fallback == settings.llm_provider:
+        problems.append("LLM_FALLBACK_PROVIDER:must_differ_from_primary")
     if settings.embedding_provider != "gemini":
         problems.append("EMBEDDING_PROVIDER:must_be_hosted")
+    chat_providers = {settings.llm_provider, fallback}
     if (
-        settings.llm_provider == "gemini" or settings.embedding_provider == "gemini"
+        "gemini" in chat_providers or settings.embedding_provider == "gemini"
     ) and settings.gemini_api_key is None:
         problems.append("GEMINI_API_KEY:missing")
+    if "cloudflare" in chat_providers:
+        if not re.fullmatch(r"[0-9a-f]{32}", (settings.cloudflare_account_id or "").strip()):
+            problems.append("CLOUDFLARE_ACCOUNT_ID:missing_or_invalid")
+        if not _set(settings.cloudflare_api_token):
+            problems.append("CLOUDFLARE_API_TOKEN:missing")
+        if not (settings.cloudflare_model or "").strip():
+            problems.append("CLOUDFLARE_MODEL:missing")
     if settings.langsmith_tracing and settings.langsmith_api_key is None:
         problems.append("LANGSMITH_API_KEY:missing_while_tracing_enabled")
     return problems

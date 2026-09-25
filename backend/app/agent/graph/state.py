@@ -22,6 +22,9 @@ _SAFE_THREAD_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 RUN_RESET: dict[str, Any] = {
     "pending": None,
     "model_calls": 0,
+    # Which provider actually answered each model call of this run ({round, provider,
+    # fallback_used}); identifiers only.
+    "model_providers": [],
     "tool_calls": [],
     "invalid_tool_calls": [],
     "seen_tool_call_ids": [],
@@ -89,6 +92,8 @@ class CommerceGraphState(TypedDict, total=False):
     # node appends it together with the complete ordered ToolMessage batch, then clears it.
     pending: AIMessage | None
     model_calls: int
+    # Per model call: {"round", "provider", "fallback_used"} (the provider that answered).
+    model_providers: list[dict[str, Any]]
     # Plain dicts (ToolCallSummary / InvalidToolCallSummary .model_dump()) so checkpoints
     # hold only JSON primitives, not application classes.
     tool_calls: list[dict[str, Any]]

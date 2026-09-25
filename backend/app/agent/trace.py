@@ -125,9 +125,18 @@ def model_detail(tool_names: Iterable[str], *, retrieval: bool, proposal: bool, 
     return "Composed the final answer" if final else "Model turn"
 
 
-def model_step(round_no: int, provider: str, detail: str) -> TraceStep:
+def model_step(
+    round_no: int, provider: str, detail: str, *, fallback_used: bool = False
+) -> TraceStep:
+    """``provider``: the provider that actually answered this model call. ``fallback_used``
+    is reported (as ``True``) only when the configured primary could not serve the call."""
     return TraceStep.of(
-        TraceEventKind.MODEL, MODEL_LABEL, detail=detail, call=round_no, provider=provider
+        TraceEventKind.MODEL,
+        MODEL_LABEL,
+        detail=detail,
+        call=round_no,
+        provider=provider,
+        fallback_used=True if fallback_used else None,
     )
 
 
@@ -327,12 +336,15 @@ def build_execution_trace(
     action: dict[str, Any] | None,
     public_demo: bool = False,
 ) -> list[ExecutionTraceEvent]:
-    """``values``: the graph state after the run (or after resuming it)."""
+    """``values``: the graph state after the run (or after resuming it). ``provider``: the
+    configured provider, used only for model rounds recorded before per-call providers were
+    tracked (``model_providers``)."""
     trace = _Trace()
     tool_calls = values.get("tool_calls", [])
     retrievals = values.get("retrievals", [])
     proposals = values.get("action_calls", [])
     model_calls = int(values.get("model_calls", 0))
+    served = {int(m.get("round", 0)): m for m in values.get("model_providers", [])}
 
     trace.add(request_step(public_demo=public_demo))
     for round_no in range(1, model_calls + 1):
@@ -346,7 +358,15 @@ def build_execution_trace(
             proposal=bool(r_proposals),
             final=final,
         )
-        trace.add(model_step(round_no, provider, detail))
+        call = served.get(round_no, {})
+        trace.add(
+            model_step(
+                round_no,
+                str(call.get("provider") or provider),
+                detail,
+                fallback_used=bool(call.get("fallback_used")),
+            )
+        )
         for t in r_tools:
             trace.add(tool_step(t))
         for r in r_retrievals:

@@ -239,6 +239,10 @@ RUN_OLLAMA_INTEGRATION=1 TEST_DATABASE_URL=... uv run pytest tests/db/test_assis
 RUN_OLLAMA_INTEGRATION=1 TEST_DATABASE_URL=... uv run pytest tests/db/test_embeddings_live.py
 # Live RAG (chat model = LIVE_RAG_MODEL if set, else OLLAMA_MODEL; plus the embedding model):
 RUN_OLLAMA_INTEGRATION=1 TEST_DATABASE_URL=... uv run pytest tests/db/test_rag_live.py
+# Cloudflare Workers AI chat (protocol check: structured tool call + tool round trip; synthetic
+# data only; needs CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN, optional CLOUDFLARE_MODEL):
+RUN_CLOUDFLARE_INTEGRATION=1 uv run pytest tests/llm/test_cloudflare_live.py
+RUN_CLOUDFLARE_INTEGRATION=1 TEST_DATABASE_URL=... uv run pytest tests/db/test_graph_live.py -k cloudflare
 
 cd ../frontend
 npm run lint && npm run typecheck && npm test && npm run build

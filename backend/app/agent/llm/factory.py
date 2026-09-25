@@ -1,17 +1,27 @@
-"""Provider factory: the only place that knows about Ollama vs Gemini.
+"""Provider factory: the only place that knows about Ollama vs Gemini vs Cloudflare.
 
 Construction performs no network I/O (no model validation, no discovery calls). All
-provider- and model-specific parameters stay here.
+provider- and model-specific parameters stay here. Chat inference only: the embedding
+provider (``app.knowledge.embeddings``) is configured independently.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import httpx
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
-from app.agent.llm.config import LLMConfig, ProviderName
+from app.agent.llm.config import LLMConfig, ProviderName, cloudflare_base_url
 from app.agent.llm.errors import LLMConfigurationError
-from app.agent.llm.provider import ChatModelProvider, LLMProvider, ProviderInfo, RetryPolicy
+from app.agent.llm.provider import (
+    ChatModelProvider,
+    FallbackProvider,
+    LLMProvider,
+    MessagePreparer,
+    ProviderInfo,
+    RetryPolicy,
+    StructuredMethod,
+)
 from app.core.config import Settings, get_settings
 
 # Output is a small JSON object; cap generation for local models to bound latency.
@@ -54,18 +64,75 @@ def _build_gemini(config: LLMConfig) -> BaseChatModel:
     )
 
 
+# Cloudflare Workers AI: the OpenAI-compatible Chat Completions endpoint (tools, tool_calls
+# with preserved ids, multi-turn tool round-trips). Called directly from the backend.
+CLOUDFLARE_MAX_OUTPUT_TOKENS = 1024
+
+
+def _build_cloudflare(
+    config: LLMConfig, *, http_client: httpx.Client | None = None
+) -> BaseChatModel:
+    from langchain_openai import ChatOpenAI
+
+    assert config.cloudflare_account_id is not None  # guaranteed by LLMConfig
+    assert config.cloudflare_api_token is not None
+    return ChatOpenAI(
+        model=config.model,
+        base_url=cloudflare_base_url(config.cloudflare_account_id),
+        api_key=config.cloudflare_api_token,  # explicit; never read implicitly from env
+        timeout=config.timeout_seconds,
+        max_retries=0,  # retries are owned by ChatModelProvider's RetryPolicy
+        temperature=0,
+        # Workers AI's native field (its default output budget is small); sent verbatim.
+        extra_body={"max_tokens": CLOUDFLARE_MAX_OUTPUT_TOKENS},
+        stream_usage=False,
+        http_socket_options=(),  # keep httpx defaults (proxy env honoured)
+        http_client=http_client,  # tests inject a mock transport; None = SDK default
+    )
+
+
+def openai_compatible_messages(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
+    """History for an OpenAI-compatible endpoint: plain text + tool calls only.
+
+    A thread may hold turns another provider produced (e.g. Gemini content blocks, thought
+    signatures). Those provider-specific parts are dropped for this request only; the
+    checkpointed history is unchanged and tool-call ids are preserved exactly."""
+    out: list[BaseMessage] = []
+    for m in messages:
+        if isinstance(m, AIMessage):
+            out.append(AIMessage(content=m.text, tool_calls=list(m.tool_calls), id=m.id))
+        elif isinstance(m, ToolMessage) and not isinstance(m.content, str):
+            out.append(
+                ToolMessage(
+                    content=m.text, tool_call_id=m.tool_call_id, name=m.name, status=m.status
+                )
+            )
+        else:
+            out.append(m)
+    return out
+
+
 _BUILDERS: dict[ProviderName, Callable[[LLMConfig], BaseChatModel]] = {
     "ollama": _build_ollama,
     "gemini": _build_gemini,
+    "cloudflare": _build_cloudflare,
 }
+# Workers AI JSON mode covers only some models, so structured output uses one forced tool
+# call there; results are re-validated with the full Pydantic schema either way.
+_STRUCTURED: dict[ProviderName, StructuredMethod] = {"cloudflare": "tool_call"}
+_PREPARE: dict[ProviderName, MessagePreparer] = {"cloudflare": openai_compatible_messages}
 
 
-def build_provider(config: LLMConfig) -> LLMProvider:
+def build_provider(config: LLMConfig, *, http_client: httpx.Client | None = None) -> LLMProvider:
+    """``http_client``: test hook for the OpenAI-compatible (Cloudflare) client only."""
     builder = _BUILDERS.get(config.provider)
     if builder is None:  # unreachable via LLMConfig, kept as a hard guard
         raise LLMConfigurationError("Unsupported LLM provider.")
     try:
-        chat_model = builder(config)
+        if config.provider == "cloudflare":
+            chat_model = _build_cloudflare(config, http_client=http_client)
+        else:
+            chat_model = builder(config)
     except LLMConfigurationError:
         raise
     except Exception:  # noqa: BLE001 - never surface constructor text (could echo config)
@@ -76,12 +143,24 @@ def build_provider(config: LLMConfig) -> LLMProvider:
         chat_model,
         ProviderInfo(provider=config.provider, model=config.model),
         RetryPolicy(max_retries=config.max_retries),
+        structured_method=_STRUCTURED.get(config.provider, "json_schema"),
+        prepare_messages=_PREPARE.get(config.provider),
     )
 
 
 def get_llm_provider(
     settings: Settings | None = None, *, provider: str | None = None, model: str | None = None
 ) -> LLMProvider:
-    """Build the configured provider. ``provider``/``model`` override settings (CLI use)."""
-    config = LLMConfig.from_settings(settings or get_settings(), provider=provider, model=model)
-    return build_provider(config)
+    """Build the configured provider. ``provider``/``model`` override settings (CLI use; an
+    explicit override never adds a fallback). With ``LLM_FALLBACK_PROVIDER`` set, the result
+    is a ``FallbackProvider`` (per-model-call fallback on availability errors only)."""
+    settings = settings or get_settings()
+    config = LLMConfig.from_settings(settings, provider=provider, model=model)
+    primary = build_provider(config)
+    fallback_name = settings.llm_fallback_provider
+    if provider is not None or model is not None or fallback_name is None:
+        return primary
+    if fallback_name == config.provider:
+        raise LLMConfigurationError("LLM_FALLBACK_PROVIDER must differ from LLM_PROVIDER.")
+    fallback = build_provider(LLMConfig.from_settings(settings, provider=fallback_name))
+    return FallbackProvider(primary, fallback)

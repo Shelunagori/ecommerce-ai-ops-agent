@@ -69,6 +69,12 @@ const FRIENDLY: Record<string, string> = {
   public_demo_unavailable: "The public demo is temporarily unavailable. Please try again later.",
   public_demo_disabled: "The public demo is not enabled on this server.",
   rate_limited: "You are sending messages too quickly. Wait a moment and try again.",
+  public_demo_limit_reached: "Public demo limit reached. Please start a reviewer session or try again later.",
+  // Model providers (after the configured fallback, if any, was also tried): short and safe.
+  llm_rate_limited: "The AI model is busy right now. Please try again in a minute.",
+  llm_quota_exceeded: "The AI model is busy right now. Please try again in a minute.",
+  llm_unavailable: "The AI model is temporarily unavailable. Please try again in a minute.",
+  llm_timeout: "The AI model took too long to respond. Please try again.",
 };
 
 export function describe(error: ApiError): string {

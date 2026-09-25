@@ -34,6 +34,10 @@ See [docs/COMPLETION_STATUS.md](docs/COMPLETION_STATUS.md).
   failure): graph steps, tools, retrieval (pgvector or full-text), grounding, approval pause
   and execution — streamed over SSE (`POST /api/agent/messages/stream`), safe metadata only,
   never prompts or model reasoning.
+* **Provider-abstracted chat** — Cloudflare Workers AI is the primary chat / tool-calling
+  model with Gemini as a per-model-call fallback (rate limit, timeout, unavailable only;
+  tools and actions are never replayed). Embeddings stay on their own, unchanged Gemini
+  profile. The trace badge names the provider that actually answered each model call.
 * **`/review`** — a public engineering case study: architecture, request flows, RAG, HITL,
   security boundaries, evaluation evidence and deployment.
 
@@ -56,7 +60,7 @@ flowchart LR
   U[Browser<br/>Next.js UI] -->|Bearer JWT, X-Tenant-ID selector| API[FastAPI]
   API --> AUTH[Principal<br/>JWT + memberships]
   API --> G[LangGraph agent]
-  G --> M[Chat model<br/>Ollama local / Gemini hosted]
+  G --> M[LLM provider layer<br/>Cloudflare Workers AI primary<br/>Gemini fallback per call · Ollama local]
   G --> T[Read-only commerce tools]
   G --> R[Policy retrieval<br/>pgvector]
   G --> P[Action proposals]
