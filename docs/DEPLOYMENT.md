@@ -1,8 +1,13 @@
 # Deployment readiness (Railway + Supabase + Vercel)
 
-> **Status: prepared, not deployed.** Nothing in this repository has been deployed, no
-> hosted resource has been created and no secret exists in the repo. This runbook is what an
-> operator follows to deploy the portfolio demo. All data is **synthetic**.
+> **Status: deployed.** The operator followed this runbook to deploy the portfolio demo:
+> Vercel (frontend), Railway (API; pre-deploy migrations and checkpoint setup ran), Supabase
+> (Auth incl. anonymous demo sessions, PostgreSQL + pgvector), Cloudflare Workers AI (chat)
+> and Gemini (embeddings; chat fallback). Verified live: sign-in and tenant membership, the
+> read-only public demo, the streamed execution trace, a Cloudflare (GLM 4.7 Flash) commerce
+> lookup, and a cited policy answer with grounding validation. Not every failure or rollback
+> path below has been exercised manually on the hosted stack. No secret is in the repo; all
+> data is **synthetic**. Live: <https://ecommerce-ai-ops-agent.vercel.app>.
 
 ## Topology
 
@@ -13,7 +18,8 @@ flowchart LR
   B -->|HTTPS + Bearer JWT<br/>X-Tenant-ID selector| R[Railway<br/>FastAPI container]
   R -->|JWKS verify| SA
   R -->|Supavisor session pooler<br/>sslmode=require| DB[(Supabase Postgres<br/>+ pgvector)]
-  R -->|synthetic data only| G[Gemini API<br/>chat + embeddings]
+  R -->|chat primary<br/>synthetic data only| CF[Cloudflare Workers AI]
+  R -->|embeddings + chat fallback<br/>synthetic data only| G[Gemini API]
 ```
 
 | Piece | Host | Notes |
@@ -22,7 +28,7 @@ flowchart LR
 | API | Railway, root directory `backend` | `backend/Dockerfile` (non-root, `$PORT`), `backend/railway.json` |
 | Database | Supabase Postgres | pgvector enabled by migration `0003`; checkpoints by `setup_checkpoints` |
 | Identity | Supabase Auth | backend verifies JWTs via JWKS; tenants from `tenant_memberships` |
-| Inference | Gemini API | chat (`LLM_PROVIDER=gemini`) and embeddings (`EMBEDDING_PROVIDER=gemini`) |
+| Inference | Cloudflare Workers AI + Gemini API | chat `LLM_PROVIDER=cloudflare` with `LLM_FALLBACK_PROVIDER=gemini`; embeddings `EMBEDDING_PROVIDER=gemini` |
 
 ## Environment variables (names only — set values in each host's secret store)
 
@@ -45,7 +51,7 @@ flowchart LR
 | `LLM_FALLBACK_PROVIDER` | no | `gemini` (recommended with Cloudflare); must differ from `LLM_PROVIDER` |
 | `CLOUDFLARE_ACCOUNT_ID` | when Cloudflare is primary or fallback | 32-hex account id (config; keep it private) |
 | `CLOUDFLARE_API_TOKEN` | when Cloudflare is primary or fallback | **secret** — API token with *Workers AI: Read* |
-| `CLOUDFLARE_MODEL` | no | default `@cf/meta/llama-4-scout-17b-16e-instruct` (must support function calling) |
+| `CLOUDFLARE_MODEL` | no | deployed: `@cf/zai-org/glm-4.7-flash`; code default `@cf/meta/llama-4-scout-17b-16e-instruct` (must support function calling) |
 | `GEMINI_API_KEY` | yes (embeddings; and Gemini chat primary/fallback) | **secret** |
 | `GEMINI_MODEL` | no | default in `app/core/config.py` |
 | `EMBEDDING_PROVIDER` | yes | `gemini` — unchanged by the chat provider choice |
@@ -63,27 +69,29 @@ values.
 
 ### Chat provider: Cloudflare Workers AI primary, Gemini fallback
 
-The LLM provider and the embedding provider are **independent**. The recommended
-production setup changes only chat inference:
+The LLM provider and the embedding provider are **independent**. The deployed
+configuration (placeholders only):
 
 ```
 LLM_PROVIDER=cloudflare
 LLM_FALLBACK_PROVIDER=gemini
 CLOUDFLARE_ACCOUNT_ID=<config: 32-hex account id>
 CLOUDFLARE_API_TOKEN=<SECRET: token with Workers AI Read>
-CLOUDFLARE_MODEL=@cf/meta/llama-4-scout-17b-16e-instruct
-GEMINI_API_KEY=<SECRET: existing key — fallback chat + embeddings>
+CLOUDFLARE_MODEL=@cf/zai-org/glm-4.7-flash
+GEMINI_API_KEY=<SECRET: fallback chat + embeddings>
+
+# unchanged by the chat provider — the stored pgvector embeddings stay valid:
+EMBEDDING_PROVIDER=gemini
+GEMINI_EMBEDDING_MODEL=gemini-embedding-2
+EMBEDDING_DIMENSIONS=768
+```
 
 * **Tool-call ids.** If Workers AI omits a tool call's `id`, the backend assigns one
   (`cf_call_…`) and logs `tool_call_id_normalized` on the `llm call` line. To see the raw
   provider shape (structure only), run the opt-in live tests with `-s`
   (`tests/llm/test_cloudflare_live.py`).
-
-# unchanged — the stored pgvector embeddings stay valid, no re-embedding:
-EMBEDDING_PROVIDER=gemini
-GEMINI_EMBEDDING_MODEL=gemini-embedding-2
-EMBEDDING_DIMENSIONS=768
-```
+* **Paste the bare model id** into Railway (no quotes, no `CLOUDFLARE_MODEL=` prefix, no
+  invisible characters); otherwise startup fails with "A valid model name is required".
 
 * The Railway API calls `https://api.cloudflare.com/client/v4/accounts/<id>/ai/v1/chat/completions`
   (OpenAI-compatible, tools + `tool_calls`) directly; no Cloudflare Worker is deployed. The
@@ -135,13 +143,15 @@ project CA). Source: Supabase "Connect to your database" guide (checked Sept 202
   *Database → Extensions* before the first deploy. Downgrades never drop the extension.
 * **No local dependency at start-up.** Construction is network-free (models, embeddings,
   JWKS and the checkpoint pool are created lazily); `/health` answers without a database.
-  Ollama is never needed in production (`LLM_PROVIDER`/`EMBEDDING_PROVIDER=gemini` enforced).
+  Ollama is never needed in production: a hosted chat provider (`cloudflare` or `gemini`)
+  and `EMBEDDING_PROVIDER=gemini` are enforced.
 * **Live execution stream.** `POST /api/agent/messages/stream` and
   `/api/agent/actions/{id}/approve|reject/stream` answer `text/event-stream` with
   `X-Accel-Buffering: no`, `Cache-Control: no-store` and a comment heartbeat every 15 s, so an
   idle edge proxy keeps the connection open during a long model call. The browser calls the
   Railway API directly (not through a Vercel rewrite), so Vercel does not buffer it. Nothing
-  new to configure; verify once on the deployed stack (P26). A disconnect never cancels a run.
+  new to configure. Verified on the deployed stack: the browser receives step events while
+  the run executes (running → completed / failed). A disconnect never cancels a run.
 * **Checkpoint retention.** No automatic TTL; completed threads stay until deleted
   (`delete_checkpoint_thread`). Prune deliberately if storage matters (P6).
 
@@ -245,8 +255,9 @@ member user sees approve/reject disabled.
 
 ## Local verification of the container contract
 
-The image could not be built in the development sandbox (Docker Hub is blocked there). On a
-machine with Docker:
+Railway builds and runs `backend/Dockerfile` on every deploy. The development sandbox could
+not build it (Docker Hub is blocked there); to check the container contract on a machine
+with Docker:
 
 ```bash
 cd backend
@@ -260,8 +271,13 @@ docker run --rm -e APP_ENV=production commerceops-api:local   # exits: invalid p
 The same `CMD` was verified in the sandbox by running it as an unprivileged user with a custom
 `PORT` (health ok, readiness 503 without a database, production config refused at startup).
 
-## Not done (out of scope for local completion)
+## Not yet verified on the hosted stack
 
-No Railway/Supabase/Vercel resources were created, no deployment happened, no secrets were
-generated or rotated, and no live Supabase/Gemini call was made. See
-`docs/pending-items.md`.
+* The Gemini chat fallback (an actual Cloudflare availability failure served by Gemini)
+  (P14).
+* The one-shot capability-sequencing correction for a mixed commerce + policy batch (P34)
+  and the raw Workers AI tool-call id shape (P33).
+* Manual rollback (redeploying a previous image) and long idle runs against the proxies'
+  timeouts.
+
+See `docs/pending-items.md`.

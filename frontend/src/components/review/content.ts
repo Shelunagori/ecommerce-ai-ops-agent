@@ -52,7 +52,7 @@ export const FLOWS: Flow[] = [
     prompt: "Where is SHP-1003, and what compensation applies if it is delayed?",
     steps: [
       { authority: "model", title: "MODEL node", note: "Commerce facts first" },
-      { authority: "deterministic", title: "get_shipment → PostgreSQL", note: "Status: delayed" },
+      { authority: "deterministic", title: "get_shipment → PostgreSQL", note: "Tenant-scoped shipment facts returned" },
       { authority: "model", title: "MODEL node", note: "Then policy knowledge" },
       { authority: "knowledge", title: "Policy retrieval → pgvector", note: "After retrieval, no new commerce tool may run in the turn" },
       { authority: "deterministic", title: "Grounding validation", note: "Stale or invented citations are rejected" },

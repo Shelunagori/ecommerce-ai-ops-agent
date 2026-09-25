@@ -4,6 +4,32 @@ Source of truth between iterations of the "Remaining Project Completion Spec". S
 point: `main` @ `93c526e` (Step 9, end-to-end policy RAG). Baseline measured at the start:
 **1092 passed, 21 skipped** (full PostgreSQL suite).
 
+## Current production verification (2026-09-25)
+
+The portfolio demo is **deployed by the operator** (not by the assistant) and exercised live:
+
+| Area | Verified live |
+| --- | --- |
+| Hosting | Vercel (frontend), Railway (FastAPI; pre-deploy migrations + checkpoint setup ready), Supabase PostgreSQL + pgvector |
+| Auth | Supabase sign-in → JWT → `/api/me` → tenant memberships; anonymous "Try Live Demo" sessions |
+| Public demo | read-only BluePeak tenant (no action tools) |
+| Live trace | SSE `POST /api/agent/messages/stream` through the hosted stack; running / completed / failed steps in the UI |
+| Chat | Cloudflare Workers AI primary (`@cf/zai-org/glm-4.7-flash`): commerce tool call (lookup) succeeded |
+| RAG | policy retrieval with Gemini embeddings, cited answer, grounding validation |
+
+Not yet observed live: the Gemini chat fallback (P14), the capability-sequencing correction
+(P34), the raw Workers AI tool-call id shape (P33); no live evaluation run (P15, P30).
+
+Latest verified test runs on the committed tree (`a220c42`): backend **1543 passed, 25
+skipped** (real PostgreSQL); frontend unit **85**; Playwright **20/20** (full suite,
+re-run 2026-09-25 during the docs reconciliation).
+
+The sections below are the **historical implementation log** in build order. Their
+"complete locally", "not deployed" and "blocked: credentials" statements describe the state
+at the time each phase was written and are kept unchanged on purpose.
+
+---
+
 Rules followed in every phase: tests first where practical, smallest coherent change,
 phase tests + regressions + mutations, docs, then this file. No commits, no pushes, no
 deployments. Decisions marked **(V)** are the implementer's and can be vetoed.

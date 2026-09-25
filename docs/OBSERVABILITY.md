@@ -22,6 +22,17 @@ The per-call provider also reaches the execution trace (`metadata.provider`,
 tokens, `Authorization` headers or provider response bodies; HTTP client libraries are held
 at WARNING so request URLs (Cloudflare account id) stay out of the log.
 
+## Live execution trace (SSE)
+
+`POST /api/agent/messages/stream` (and the approve/reject `/stream` variants) answers
+`text/event-stream` over a normal `fetch` POST (body, bearer token, tenant header). Events
+are emitted by the graph nodes at the real start and end of each operation — model call,
+commerce tool, policy retrieval, grounding check, approval pause, deterministic execution —
+never by timers. They carry fixed labels, counts, outcomes, provider names and measured
+durations only: no chain-of-thought, prompts, messages, retrieved policy text, SQL,
+embeddings, tool arguments, tenant ids or tokens. The answer text is not token-streamed; it
+arrives with `run_completed`. Verified on the deployed stack.
+
 ## Correlation ids
 
 | Id | Where it appears |

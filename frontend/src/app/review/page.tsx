@@ -167,7 +167,7 @@ export default function ReviewPage() {
         <Section
           id="live-trace"
           title="Real-time execution trace"
-          lead="While a run executes, the backend streams its real execution boundaries to the browser: each model call, commerce tool, policy retrieval, grounding check, approval pause and deterministic execution appears as it starts and turns green (or red) when it ends."
+          lead="While a run executes, the backend streams its real execution boundaries to the browser: each model call, commerce tool, policy retrieval, grounding check, approval pause and deterministic execution appears as it starts and turns green (or red) when it ends. The answer text arrives when the run completes; it is not token-streamed."
         >
           <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-start">
             <div className="grid gap-3 sm:grid-cols-2">

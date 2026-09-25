@@ -9,8 +9,13 @@ before anything changes.
 > orders and policies. No real customer or company data is used, and no real payment or
 > refund provider exists (store credit is a synthetic ledger).
 
-**Status:** complete locally (tests, e2e, deployment runbook). **Not deployed.**
-See [docs/COMPLETION_STATUS.md](docs/COMPLETION_STATUS.md).
+**[Live demo](https://ecommerce-ai-ops-agent.vercel.app)** ·
+**[Engineering review](https://ecommerce-ai-ops-agent.vercel.app/review)** ·
+**[GitHub](https://github.com/Shelunagori/ecommerce-ai-ops-agent)**
+
+**Status:** live on Vercel + Railway with Supabase (Auth, PostgreSQL + pgvector) and
+Cloudflare Workers AI. A portfolio demo on synthetic data — no availability guarantee.
+Build history and verification: [docs/COMPLETION_STATUS.md](docs/COMPLETION_STATUS.md).
 
 ## What it does
 
@@ -33,7 +38,8 @@ See [docs/COMPLETION_STATUS.md](docs/COMPLETION_STATUS.md).
   the run's real backend steps as they happen (amber while running, green when done, red on
   failure): graph steps, tools, retrieval (pgvector or full-text), grounding, approval pause
   and execution — streamed over SSE (`POST /api/agent/messages/stream`), safe metadata only,
-  never prompts or model reasoning.
+  never prompts or model reasoning. The trace is streamed; the answer text itself arrives
+  when the run completes (it is not token-streamed).
 * **Provider-abstracted chat** — Cloudflare Workers AI is the primary chat / tool-calling
   model with Gemini as a per-model-call fallback (rate limit, timeout, unavailable only;
   tools and actions are never replayed). Embeddings stay on their own, unchanged Gemini
@@ -102,8 +108,9 @@ Key decisions (details in [docs/architecture.md](docs/architecture.md)):
 * **Fail closed.** Infrastructure failures become stable error codes (never "no policy
   exists"); uncertain non-idempotent writes are never retried automatically; durable
   checkpoints let an approved request resume idempotently after a crash.
-* **Local vs hosted.** Ollama for local development (chat + embeddings); Gemini for the
-  hosted demo. Each embedding provider/model/revision is a separate profile — vectors never
+* **Local vs hosted.** Ollama for local development (chat + embeddings). Hosted: Cloudflare
+  Workers AI for chat / tool calling, Gemini as the per-call chat fallback, Gemini for
+  embeddings. Each embedding provider/model/revision is a separate profile — vectors never
   mix.
 * **One process, one database.** No Redis, queues or microservices; PostgreSQL holds business
   data, knowledge, embeddings, actions, audit and checkpoints.
@@ -145,7 +152,7 @@ GitHub Actions ([`ci.yml`](.github/workflows/ci.yml)) runs `backend`, `frontend`
 | [architecture.md](docs/architecture.md) | design and decisions, step by step |
 | [DEMO_SCENARIOS.md](docs/DEMO_SCENARIOS.md) | five demo walkthroughs |
 | [DEVELOPMENT.md](docs/DEVELOPMENT.md) | setup, CLI reference, tests |
-| [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Railway + Supabase + Vercel runbook (not executed) |
+| [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Railway + Supabase + Vercel runbook (used for the live deployment) |
 | [CI_CD.md](docs/CI_CD.md) | GitHub Actions CI, native Railway/Vercel deploys, branch protection, rollback |
 | [SECURITY.md](docs/SECURITY.md) | trust boundaries, controls, review results |
 | [OBSERVABILITY.md](docs/OBSERVABILITY.md) | logs, run records, audit trail, optional LangSmith |
@@ -153,9 +160,12 @@ GitHub Actions ([`ci.yml`](.github/workflows/ci.yml)) runs `backend`, `frontend`
 
 ## Limitations
 
-Small synthetic evaluation sets; no hybrid ranking or reranker; no streaming responses;
-in-process rate limiting; thread history is not trimmed; no live Supabase/Gemini
-verification was run; nothing is deployed. See [pending-items.md](docs/pending-items.md).
+Small synthetic evaluation sets; no hybrid ranking or reranker; the answer text is not
+token-streamed (the execution trace is); rate limiting is per process; thread history is
+not trimmed; no global spend cap on the hosted model; hosted-model behaviour is exercised on
+individual live queries, not measured by a live evaluation (the Gemini chat fallback and the
+mixed-batch correction have not been observed live). See
+[pending-items.md](docs/pending-items.md).
 
 ```
 backend/   FastAPI app (api, agent, actions, auth, knowledge, observability), alembic, scripts, tests

@@ -109,7 +109,9 @@ ollama serve                # if the Ollama app is not already running
 uv run python -m scripts.run_llm --provider ollama --text "Show me order ORD-1001"
 ```
 
-Hosted demo — Gemini (set `GEMINI_API_KEY` in `backend/.env`, never commit it):
+Gemini (the hosted chat fallback and embedding provider; set `GEMINI_API_KEY` in
+`backend/.env`, never commit it). The hosted primary chat model is Cloudflare Workers AI —
+see the opt-in `RUN_CLOUDFLARE_INTEGRATION=1` live tests:
 
 ```bash
 uv run python -m scripts.run_llm --provider gemini --text "Where is shipment SHP-1003?"

@@ -1,6 +1,7 @@
 # Architecture notes
 
-Current state: **locally complete (Phases 1–13 of the completion spec), not deployed.** The
+Current state: **deployed** (Vercel + Railway + Supabase; Cloudflare Workers AI chat with a
+Gemini fallback, Gemini embeddings; see `COMPLETION_STATUS.md` for what was verified live). The
 LangGraph agent answers commerce questions from tenant-scoped tools, policy questions with
 validated citations, and proposes two narrow write actions that execute only after a human
 approver's decision. Conversations are durable (PostgreSQL checkpoints); identity is a
@@ -381,7 +382,8 @@ tools are bound, retries must stay at the model-call level and never re-run acti
 prompt version, outcome (`ok`/`retrying`/`error`), error code/type, attempts, input length,
 duration. Never keys, prompts or model responses.
 
-**Data.** The hosted demo uses Gemini with **synthetic demo data only**; no real customer,
+**Data.** The hosted demo sends **synthetic demo data only** to its providers (Cloudflare
+Workers AI for chat, Gemini for the chat fallback and embeddings); no real customer,
 employer, client (e.g. Brandhub) or other confidential data may be sent to the (free) API.
 The hosted backend never needs Ollama; no model artifacts go into the Docker image.
 
@@ -393,8 +395,10 @@ surface as safe typed errors. They deliberately do not assert which intent a mod
 semantic quality belongs to the later evaluation framework.
 
 ### Why a provider abstraction?
-Local development runs free on Ollama; the hosted demo uses Gemini; the agent and tool
-layers stay provider-neutral, so switching is a configuration change.
+Local development runs free on Ollama; the hosted demo uses Cloudflare Workers AI for chat
+(Gemini as the per-call fallback) and Gemini for embeddings; the agent and tool layers stay
+provider-neutral, so switching is a configuration change. (This step originally targeted
+Gemini for hosted chat; Cloudflare was added later, see "Chat providers".)
 
 ### Why are tools not bound yet?
 The model layer is validated on its own, so model failures (timeouts, invalid output) can
@@ -1079,7 +1083,9 @@ any instance. Store failures map to `agent_state_unavailable`.
   select and whether it may approve. `AUTH_MODE=demo` only locally.
 * Endpoints: `GET /api/me`, `POST /api/agent/messages`, `GET /api/agent/threads/{id}/messages`
   (sanitised), `GET /api/agent/actions[/{id}]`, `POST /api/agent/actions/{id}/approve|reject`.
-  No streaming **(V)**: runs pause for approvals and end with deterministic messages.
+  No streaming **(V)** at this phase: runs pause for approvals and end with deterministic
+  messages. (Later superseded for the execution trace — see "Live execution trace"; the answer
+  text is still not token-streamed.)
 
 ### Hosted inference
 
@@ -1123,7 +1129,9 @@ security headers; no public API docs in production. See `DEPLOYMENT.md` and `SEC
 ## Live execution trace (streaming)
 
 The execution trace is also streamed **while the run executes**, so the UI shows each real
-step turning amber (running) and then green (completed) or red (failed).
+step turning amber (running) and then green (completed) or red (failed). Only step events are
+streamed: the answer text arrives with `run_completed` (no token streaming, P21). Verified on
+the deployed Railway + Vercel stack.
 
 ```
 Browser ──POST /api/agent/messages/stream (fetch + ReadableStream)──▶ FastAPI

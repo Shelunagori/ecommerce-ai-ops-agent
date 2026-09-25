@@ -101,7 +101,7 @@ going live, enable (dashboard settings, no code changes):
 ### Secrets
 
 GitHub needs **no** secrets or deployment variables for this flow. Runtime configuration lives
-in the platforms: Railway service variables (`DATABASE_URL`, `GEMINI_API_KEY`, …) and Vercel
+in the platforms: Railway service variables (`DATABASE_URL`, `CLOUDFLARE_API_TOKEN`, `GEMINI_API_KEY`, …) and Vercel
 project environment variables (`NEXT_PUBLIC_*`). Names are listed in
 [DEPLOYMENT.md](DEPLOYMENT.md).
 

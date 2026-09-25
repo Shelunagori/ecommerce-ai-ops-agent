@@ -1,7 +1,8 @@
 # Security review (Phase 12)
 
 Scope: the backend API, agent graph, action execution, auth boundary, frontend and deployment
-configuration as they exist locally. All data is synthetic; nothing is deployed. Each control
+configuration (reviewed locally in Phase 12; the system is now deployed on Vercel + Railway +
+Supabase, see `COMPLETION_STATUS.md`). All data is synthetic. Each control
 below is backed by tests, and the critical ones by mutations that must turn the suite red.
 
 ## Trust boundaries
@@ -132,9 +133,8 @@ conversation history.
   mitigated by the CSP and by never rendering HTML (P18).
 * Public demo: no CAPTCHA widget yet (P24); anonymous visitors' checkpoint threads are not
   pruned automatically (P25).
-* Streaming: an abandoned read-only run still finishes and spends model budget (P28); live
-  SSE through the hosted proxies is verified locally only (P26).
-* Cloudflare Workers AI tool-calling quality with the chosen model is unmeasured (P30); a new
-  anonymous session gets a fresh demo budget (P31).
+* Streaming: an abandoned read-only run still finishes and spends model budget (P28).
+* Hosted chat-model quality is exercised on individual live queries, not measured by a live
+  evaluation (P30); a new anonymous session gets a fresh demo budget (P31).
 * `arguments_hash` is optional on approve at the API level (the UI always sends it; arguments
   are immutable after proposal) **(V)**.
