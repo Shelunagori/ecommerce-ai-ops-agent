@@ -1,5 +1,9 @@
 # CI/CD
 
+> **API host: Render (free tier).** The API now runs on Render, which deploys it from `main`.
+> The Railway sections below (`railway.json`, *Wait for CI*, redeploy, rollback) describe the
+> original Railway setup. The CI part is unchanged.
+
 ```
 git push main
   → GitHub Actions CI (backend, frontend, e2e, security)

@@ -1,4 +1,4 @@
-# Deployment readiness (Railway + Supabase + Vercel)
+# Deployment readiness (Render + Supabase + Vercel)
 
 > **Status: deployed.** The operator followed this runbook to deploy the portfolio demo:
 > Vercel (frontend), Railway (API; pre-deploy migrations and checkpoint setup ran), Supabase
@@ -8,6 +8,13 @@
 > lookup, and a cited policy answer with grounding validation. Not every failure or rollback
 > path below has been exercised manually on the hosted stack. No secret is in the repo; all
 > data is **synthetic**. Live: <https://ecommerce-ai-ops-agent.vercel.app>.
+>
+> **API host: Render (free tier).** The API now runs on Render at
+> <https://ecommerce-ai-ops-agent.onrender.com>. It was first deployed on Railway with the
+> runbook below. The variables, the container (`backend/Dockerfile`) and the Supabase setup
+> are the same on any host. The Railway-only parts of the runbook (`backend/railway.json`, its
+> pre-deploy step, *Wait for CI*, redeploy and rollback) describe that original setup. See
+> [Render free tier: cold starts](#render-free-tier-cold-starts).
 
 ## Topology
 
@@ -15,7 +22,7 @@
 flowchart LR
   B[Browser] -->|HTTPS| V[Vercel<br/>Next.js frontend]
   B -->|Supabase Auth<br/>email + password| SA[(Supabase Auth)]
-  B -->|HTTPS + Bearer JWT<br/>X-Tenant-ID selector| R[Railway<br/>FastAPI container]
+  B -->|HTTPS + Bearer JWT<br/>X-Tenant-ID selector| R[Render free tier<br/>FastAPI container]
   R -->|JWKS verify| SA
   R -->|Supavisor session pooler<br/>sslmode=require| DB[(Supabase Postgres<br/>+ pgvector)]
   R -->|chat primary<br/>synthetic data only| CF[Cloudflare Workers AI]
@@ -25,14 +32,14 @@ flowchart LR
 | Piece | Host | Notes |
 | --- | --- | --- |
 | Frontend | Vercel, root directory `frontend` | Next.js auto-detected; no `vercel.json` needed **(V)** |
-| API | Railway, root directory `backend` | `backend/Dockerfile` (non-root, `$PORT`), `backend/railway.json` |
+| API | Render (free tier: sleeps when idle); originally Railway, root directory `backend` | `backend/Dockerfile` (non-root, `$PORT`); Railway config: `backend/railway.json` |
 | Database | Supabase Postgres | pgvector enabled by migration `0003`; checkpoints by `setup_checkpoints` |
 | Identity | Supabase Auth | backend verifies JWTs via JWKS; tenants from `tenant_memberships` |
 | Inference | Cloudflare Workers AI + Gemini API | chat `LLM_PROVIDER=cloudflare` with `LLM_FALLBACK_PROVIDER=gemini`; embeddings `EMBEDDING_PROVIDER=gemini` |
 
 ## Environment variables (names only — set values in each host's secret store)
 
-### Railway (API)
+### API host (Render; originally Railway)
 
 | Variable | Required in production | Value shape |
 | --- | --- | --- |
@@ -57,7 +64,7 @@ flowchart LR
 | `EMBEDDING_PROVIDER` | yes | `gemini` — unchanged by the chat provider choice |
 | `GEMINI_EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | no | defaults `gemini-embedding-2`, `768` |
 | `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` | no | tracing is OFF by default |
-| `PORT` | injected by Railway | the container listens on it |
+| `PORT` | injected by the host (Render, Railway) | the container listens on it |
 
 `APP_ENV=production` refuses to start (and `scripts.check_env` fails) unless every
 "required" row is satisfied: `DATABASE_URL` set, `DEBUG=false`, `AUTH_MODE=supabase` with an
@@ -124,6 +131,30 @@ mode** (port 5432) works over IPv4 and supports prepared statements, which a lon
 container relies on. Transaction mode (port 6543) is for short-lived serverless clients and
 does not support prepared statements. Use `sslmode=require` (or `verify-full` with the
 project CA). Source: Supabase "Connect to your database" guide (checked Sept 2026).
+
+## Render free tier: cold starts
+
+A free Render web service stops after about 15 minutes without traffic. The next request
+starts it again, which takes up to about a minute, and the request waits for it. Without
+handling, the site looks broken during that time. The frontend handles it
+(`frontend/src/lib/backendWake.ts`, `frontend/src/components/BackendWakeNotice.tsx`):
+
+* **Silent warm-up.** Every page load sends one `GET /health` without showing anything, so a
+  visitor reading `/review` starts the API before opening the chat.
+* **Notice only when someone waits.** A read with no answer after 2.5 s, a request with no
+  response, or a bare 502/503/504 from Render's edge (no app error body) shows a notice at the
+  bottom of the page: "Waking up the backend… please wait a few seconds", with a seconds
+  counter. The status chips show "Waking backend… please wait"; the chat header shows a
+  "Waking backend" pill and sending is disabled.
+* **Recovery.** `/health` is polled every ~3 s. When it answers, the notice says "Backend is
+  awake" for ~3.5 s. Reads that failed during the wake-up are retried **once** and the page
+  fills in without a reload. Writes (chat messages, approve / reject) are **never** retried
+  automatically.
+* **Gives up after ~2.5 minutes** with "Backend unreachable", a Retry button (also on the
+  status chips) and a dismiss button.
+
+An app error with our JSON error body (for example a 503 `agent_retrieval_error`) is not
+treated as a sleeping server.
 
 ## Operational assumptions
 

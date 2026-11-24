@@ -57,3 +57,119 @@
     background-image: none !important;
   }
 }
+
+/*
+ * Backend wake-up notice (Render free tier; src/components/BackendWakeNotice.tsx).
+ */
+@keyframes wake-slide-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes wake-spin { to { transform: rotate(360deg); } }
+.wake-notice {
+  animation: wake-slide-up 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) 1;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+.wake-spinner { animation: wake-spin 0.9s linear infinite; }
+
+/*
+ * Architecture graph on /review (src/components/review/ArchitectureDiagram.tsx): an SVG node
+ * graph with flowing connectors; a request packet travels the connectors hop by hop.
+ */
+:root {
+  --arch-plain: rgb(148 163 184);
+  --arch-model: rgb(124 58 237);
+  --arch-authority: rgb(5 150 105);
+  --arch-knowledge: rgb(2 132 199);
+  --arch-human: rgb(217 119 6);
+}
+
+.arch-card {
+  background:
+    radial-gradient(120% 90% at 0% 0%, rgb(224 231 255 / 0.9), transparent 55%),
+    radial-gradient(90% 80% at 100% 100%, rgb(207 250 254 / 0.8), transparent 60%),
+    linear-gradient(135deg, rgb(248 250 252), rgb(241 245 249));
+  box-shadow: 0 1px 0 0 rgb(255 255 255 / 0.9) inset, 0 0 0 1px rgb(226 232 240), 0 24px 48px -28px rgb(30 41 59 / 0.35);
+}
+.arch-chips { background: rgb(255 255 255 / 0.55); box-shadow: inset 0 0 0 1px rgb(226 232 240); }
+
+.arch-svg { font-family: var(--font-sans); }
+.arch-frame { fill: rgb(255 255 255 / 0.35); stroke: rgb(148 163 184 / 0.6); stroke-dasharray: 4 5; }
+.arch-frame-label { font-size: 9.5px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; fill: rgb(100 116 139); }
+
+.arch-edge { fill: none; stroke: rgb(100 116 139 / 0.55); stroke-linejoin: round; transition: stroke 0.3s ease, stroke-width 0.3s ease; }
+.arch-edge-return { stroke-dasharray: 5 5; }
+.arch-flow {
+  fill: none;
+  stroke: rgb(71 85 105 / 0.7);
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-dasharray: 0.1 14;
+  animation: arch-flow 1.6s linear infinite;
+}
+.arch-flow-active { stroke-width: 4; stroke-dasharray: 0.1 10; animation-duration: 0.55s; }
+.arch-flow-reverse { animation-direction: reverse; }
+@keyframes arch-flow { to { stroke-dashoffset: -14; } }
+.arch-flow-active { animation-name: arch-flow-fast; }
+@keyframes arch-flow-fast { to { stroke-dashoffset: -10; } }
+.arch-edge-label {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  fill: rgb(71 85 105);
+  paint-order: stroke;
+  stroke: rgb(248 250 252 / 0.9);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
+
+.arch-node { transition: opacity 0.35s ease, transform 0.35s ease, filter 0.35s ease; transform-box: view-box; }
+.arch-node-dim { opacity: 0.38; }
+.arch-node-active { transform: scale(1.035); }
+.arch-box { fill: rgb(255 255 255 / 0.92); transition: stroke 0.3s ease, stroke-width 0.3s ease; }
+.arch-box-model { fill: rgb(245 243 255 / 0.95); }
+.arch-box-authority { fill: rgb(236 253 245 / 0.95); }
+.arch-box-knowledge { fill: rgb(240 249 255 / 0.95); }
+.arch-box-human { fill: rgb(255 251 235 / 0.95); }
+.arch-node-active .arch-box { filter: drop-shadow(0 8px 16px rgb(15 23 42 / 0.16)); }
+.arch-title { font-size: 13px; font-weight: 600; fill: rgb(15 23 42); }
+.arch-sub { font-size: 10.5px; fill: rgb(100 116 139); }
+
+.arch-packet-core { fill: currentColor; stroke: white; stroke-width: 2; }
+.arch-packet-halo { fill: currentColor; opacity: 0.22; animation: arch-halo 1.4s ease-out infinite; transform-box: fill-box; transform-origin: center; }
+@keyframes arch-halo {
+  0% { transform: scale(0.55); opacity: 0.45; }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+
+.arch-await { animation: arch-await 1.2s ease-in-out infinite; }
+@keyframes arch-await { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+.arch-await-text { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; fill: white; }
+
+.arch-swatch { display: inline-block; height: 0.75rem; width: 1rem; border-radius: 0.25rem; border-width: 2px; background: white; }
+
+.arch-ctl {
+  border-radius: 0.5rem;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: rgb(51 65 85);
+  box-shadow: inset 0 0 0 1px rgb(203 213 225);
+  background: rgb(255 255 255 / 0.8);
+}
+.arch-ctl:hover:not(:disabled) { background: white; }
+.arch-ctl:disabled { opacity: 0.4; cursor: not-allowed; }
+.arch-ctl:focus-visible { outline: 2px solid rgb(99 102 241); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .wake-notice,
+  .wake-spinner,
+  .arch-flow,
+  .arch-packet-halo,
+  .arch-await {
+    animation: none !important;
+  }
+  .arch-node { transition: none !important; }
+  .arch-node-active { transform: none; }
+}

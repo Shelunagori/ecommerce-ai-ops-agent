@@ -74,6 +74,82 @@ export const FLOWS: Flow[] = [
   },
 ];
 
+/** Boxes in the animated architecture graph (ArchitectureDiagram.tsx). */
+export type ArchNode =
+  | "browser"
+  | "auth"
+  | "principal"
+  | "graph"
+  | "llm"
+  | "human"
+  | "tools"
+  | "retrieval"
+  | "approval"
+  | "dbCommerce"
+  | "dbVectors"
+  | "dbAudit"
+  | "dbCheckpoints";
+
+/**
+ * One hop of a request: the packet travels the connectors from the previous box to `node`
+ * (shortest route in the graph). `pause` marks the human approval wait.
+ */
+export type ArchHop = { node: ArchNode; authority: Authority; caption: string; pause?: boolean };
+
+/**
+ * The route each FLOWS request takes through the deployed topology. Same graph paths as FLOWS
+ * (backend/app/agent/graph), drawn onto the architecture graph.
+ */
+export const ARCH_TOURS: Record<string, ArchHop[]> = {
+  commerce: [
+    { node: "auth", authority: "deterministic", caption: "Supabase Auth issues a JWT (reviewer or anonymous demo)" },
+    { node: "browser", authority: "deterministic", caption: "The browser sends “Where is SHP-1003?” with the Bearer JWT" },
+    { node: "principal", authority: "deterministic", caption: "JWT verified via JWKS → trusted tenant. The model never picks the tenant" },
+    { node: "graph", authority: "deterministic", caption: "LangGraph starts the run at the MODEL node" },
+    { node: "llm", authority: "model", caption: "The model chooses get_shipment from an explicit allowlist" },
+    { node: "tools", authority: "deterministic", caption: "get_shipment runs as a typed tool, tenant injected at runtime" },
+    { node: "dbCommerce", authority: "deterministic", caption: "A tenant-scoped query returns the exact business fact" },
+    { node: "llm", authority: "model", caption: "The model answers from the tool result" },
+    { node: "browser", authority: "deterministic", caption: "Answer + ordered execution trace stream back to the browser" },
+  ],
+  policy: [
+    { node: "browser", authority: "deterministic", caption: "The browser sends a policy question with the Bearer JWT" },
+    { node: "principal", authority: "deterministic", caption: "Verified principal → trusted tenant" },
+    { node: "graph", authority: "deterministic", caption: "LangGraph starts the run at the MODEL node" },
+    { node: "llm", authority: "model", caption: "The model requests search_policy_knowledge" },
+    { node: "retrieval", authority: "knowledge", caption: "RETRIEVE node: trusted tenant + effective date, limit enforced" },
+    { node: "dbVectors", authority: "knowledge", caption: "pgvector cosine search over versioned policy chunks" },
+    { node: "llm", authority: "model", caption: "The model writes an answer citing policy:// chunks" },
+    { node: "graph", authority: "deterministic", caption: "Grounding validation: citations must come from THIS turn's retrieval" },
+    { node: "browser", authority: "deterministic", caption: "Cited answer with source cards: title, version, effective dates" },
+  ],
+  mixed: [
+    { node: "browser", authority: "deterministic", caption: "One question needs both exact facts and policy" },
+    { node: "principal", authority: "deterministic", caption: "Verified principal → trusted tenant" },
+    { node: "llm", authority: "model", caption: "Commerce facts first: the model calls get_shipment" },
+    { node: "tools", authority: "deterministic", caption: "Typed commerce tool, tenant injected" },
+    { node: "dbCommerce", authority: "deterministic", caption: "Tenant-scoped shipment facts returned" },
+    { node: "llm", authority: "model", caption: "Then policy knowledge: the model requests retrieval" },
+    { node: "retrieval", authority: "knowledge", caption: "After retrieval, no new commerce tool may run in this turn" },
+    { node: "dbVectors", authority: "knowledge", caption: "pgvector search over the tenant's effective policies" },
+    { node: "graph", authority: "deterministic", caption: "Grounding validation rejects stale or invented citations" },
+    { node: "browser", authority: "deterministic", caption: "One answer: exact facts + cited policy" },
+  ],
+  hitl: [
+    { node: "browser", authority: "deterministic", caption: "“Cancel ORD-1004” — a request to change data" },
+    { node: "principal", authority: "deterministic", caption: "Verified principal → trusted tenant and role" },
+    { node: "llm", authority: "model", caption: "The model checks the facts, then calls propose_cancel_order" },
+    { node: "approval", authority: "deterministic", caption: "PROPOSE node validates the business rules. Nothing is written yet" },
+    { node: "dbAudit", authority: "deterministic", caption: "Pending request + audit event, in the same transaction" },
+    { node: "dbCheckpoints", authority: "deterministic", caption: "The graph pauses; its state is saved as a PostgreSQL checkpoint" },
+    { node: "human", authority: "human", caption: "Waiting for a human: the approver sees the exact arguments + hash", pause: true },
+    { node: "approval", authority: "deterministic", caption: "Approved → EXECUTE node: row lock, re-check, one write" },
+    { node: "dbCommerce", authority: "deterministic", caption: "Exactly one write, protected by an idempotency key" },
+    { node: "dbAudit", authority: "deterministic", caption: "The outcome is recorded as an audit event" },
+    { node: "browser", authority: "deterministic", caption: "Templated outcome — the model never reports the write" },
+  ],
+};
+
 export const SCENARIOS = [
   { title: "Deterministic commerce lookup", body: "Orders, shipments, invoices and customers come from 12 typed, tenant-scoped read tools over PostgreSQL — never from RAG." },
   { title: "Policy RAG with citations", body: "Versioned policies, effective-date filtering and pgvector retrieval; answers must cite chunks retrieved in the same turn." },
@@ -127,7 +203,7 @@ export const DECISIONS = [
 
 export const DEPLOYMENT = [
   { name: "Vercel", role: "Next.js frontend" },
-  { name: "Railway", role: "FastAPI container (pre-deploy: config check, migrations, checkpoints)" },
+  { name: "Render", role: "FastAPI container (free tier: sleeps when idle; the UI shows a wake-up notice)" },
   { name: "Supabase", role: "PostgreSQL + pgvector + Auth (incl. anonymous demo sessions)" },
   { name: "Cloudflare Workers AI", role: "Primary chat model, called from the API only (synthetic data only)" },
   { name: "Gemini", role: "Chat fallback + policy embeddings (synthetic data only)" },

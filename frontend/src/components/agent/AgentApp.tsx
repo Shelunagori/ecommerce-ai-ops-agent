@@ -7,6 +7,8 @@ import { getMe, newThreadId } from "@/lib/agent";
 import { AUTH_MODE, supabase } from "@/lib/auth";
 import type { ApiError, Me, Membership } from "@/lib/types";
 
+import { BackendWakePill } from "../BackendWakeNotice";
+
 import ChatPanel from "./ChatPanel";
 import SignIn from "./SignIn";
 
@@ -48,6 +50,7 @@ function Workspace({ onSignOut }: { onSignOut?: () => void }) {
         >
           Review / Architecture
         </Link>
+        <BackendWakePill />
         {me?.public_demo && (
           <span
             className="rounded-full bg-sky-50 px-2.5 py-1 text-xs font-semibold text-sky-800 ring-1 ring-inset ring-sky-200"
@@ -106,6 +109,11 @@ function Workspace({ onSignOut }: { onSignOut?: () => void }) {
             Retry
           </button>
         </div>
+      )}
+      {!me && !error && (
+        <p className="m-6 text-sm text-slate-500" data-testid="workspace-loading">
+          Loading your workspace…
+        </p>
       )}
       {me && me.memberships.length === 0 && (
         <p className="m-6 text-sm text-slate-600">Your account has no tenant access yet. Ask an administrator to grant a membership.</p>

@@ -1,6 +1,6 @@
 # Architecture notes
 
-Current state: **deployed** (Vercel + Railway + Supabase; Cloudflare Workers AI chat with a
+Current state: **deployed** (Vercel + Render + Supabase; Cloudflare Workers AI chat with a
 Gemini fallback, Gemini embeddings; see `COMPLETION_STATUS.md` for what was verified live). The
 LangGraph agent answers commerce questions from tenant-scoped tools, policy questions with
 validated citations, and proposes two narrow write actions that execute only after a human

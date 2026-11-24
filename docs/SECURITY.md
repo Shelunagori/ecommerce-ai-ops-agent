@@ -1,7 +1,7 @@
 # Security review (Phase 12)
 
 Scope: the backend API, agent graph, action execution, auth boundary, frontend and deployment
-configuration (reviewed locally in Phase 12; the system is now deployed on Vercel + Railway +
+configuration (reviewed locally in Phase 12; the system is now deployed on Vercel + Render +
 Supabase, see `COMPLETION_STATUS.md`). All data is synthetic. Each control
 below is backed by tests, and the critical ones by mutations that must turn the suite red.
 

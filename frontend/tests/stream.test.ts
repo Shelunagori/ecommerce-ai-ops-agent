@@ -82,8 +82,8 @@ describe("streamRun", () => {
 
   it("no response at all is a plain 'unreachable' failure (manual retry only)", async () => {
     let calls = 0;
-    globalThis.fetch = (async () => {
-      calls += 1;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") calls += 1; // the wake-up /health probe (GET) is not a retry
       throw new TypeError("Failed to fetch");
     }) as typeof fetch;
     expect(await streamRun("/s", { body: {}, onEvent: () => {} })).toEqual({

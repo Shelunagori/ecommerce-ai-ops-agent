@@ -13,7 +13,8 @@ before anything changes.
 **[Engineering review](https://ecommerce-ai-ops-agent.vercel.app/review)** ·
 **[GitHub](https://github.com/Shelunagori/ecommerce-ai-ops-agent)**
 
-**Status:** live on Vercel + Railway with Supabase (Auth, PostgreSQL + pgvector) and
+**Status:** live on Vercel + Render (free tier: the API sleeps when idle, and the UI shows a
+wake-up notice while it starts) with Supabase (Auth, PostgreSQL + pgvector) and
 Cloudflare Workers AI. A portfolio demo on synthetic data — no availability guarantee.
 Build history and verification: [docs/COMPLETION_STATUS.md](docs/COMPLETION_STATUS.md).
 
@@ -143,8 +144,8 @@ No model at all? Run the **offline demo** (real stack, deterministic chat model)
 | Mutations | see COMPLETION_STATUS | each safety property has at least one mutation that turns the suite red |
 
 GitHub Actions ([`ci.yml`](.github/workflows/ci.yml)) runs `backend`, `frontend`, `e2e` and
-`security` on every pull request and push to `main`. Deployment is native: Railway
-(root `backend`) and Vercel (root `frontend`) auto-deploy `main`. See
+`security` on every pull request and push to `main`. Deployment is native: Render
+(the API) and Vercel (root `frontend`) auto-deploy `main`. See
 [docs/CI_CD.md](docs/CI_CD.md).
 
 ## Documentation
@@ -154,8 +155,8 @@ GitHub Actions ([`ci.yml`](.github/workflows/ci.yml)) runs `backend`, `frontend`
 | [architecture.md](docs/architecture.md) | design and decisions, step by step |
 | [DEMO_SCENARIOS.md](docs/DEMO_SCENARIOS.md) | five demo walkthroughs |
 | [DEVELOPMENT.md](docs/DEVELOPMENT.md) | setup, CLI reference, tests |
-| [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Railway + Supabase + Vercel runbook (used for the live deployment) |
-| [CI_CD.md](docs/CI_CD.md) | GitHub Actions CI, native Railway/Vercel deploys, branch protection, rollback |
+| [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Render + Supabase + Vercel deployment; Render free-tier cold starts; the original Railway runbook |
+| [CI_CD.md](docs/CI_CD.md) | GitHub Actions CI, native Render/Vercel deploys, branch protection, rollback |
 | [SECURITY.md](docs/SECURITY.md) | trust boundaries, controls, review results |
 | [OBSERVABILITY.md](docs/OBSERVABILITY.md) | logs, run records, audit trail, optional LangSmith |
 | [pending-items.md](docs/pending-items.md) | known limitations and follow-ups |

@@ -22,6 +22,43 @@ describe("/review (public, no auth)", () => {
     }
   });
 
+  it("the architecture graph steps a request along its connectors, pausing at the human approver", async () => {
+    render(<ReviewPage />);
+    const diagram = screen.getByTestId("architecture-diagram");
+    expect(within(diagram).getByText(/Render · FastAPI/)).toBeInTheDocument();
+    expect(within(diagram).queryByText(/Railway/)).not.toBeInTheDocument();
+    const caption = within(diagram).getByTestId("arch-caption");
+    expect(caption).toHaveTextContent("1/9");
+    expect(diagram.querySelector('[data-arch-node="auth"]')).toHaveAttribute("data-state", "active");
+
+    await userEvent.click(within(diagram).getByRole("button", { name: "Next step" }));
+    expect(caption).toHaveTextContent("Bearer JWT");
+    expect(diagram.querySelector('[data-arch-edge="signin"]')).toHaveAttribute("data-state", "active");
+    expect(within(diagram).getByRole("button", { name: "Play animation" })).toBeInTheDocument(); // stepping pauses
+
+    await userEvent.click(within(diagram).getByRole("tab", { name: "HITL action" }));
+    expect(caption).toHaveTextContent("1/11");
+    for (let i = 0; i < 6; i++) await userEvent.click(within(diagram).getByRole("button", { name: "Next step" }));
+    expect(caption).toHaveTextContent("Waiting for a human");
+    expect(within(diagram).getByText("⏸ Awaiting human")).toBeInTheDocument();
+    expect(diagram.querySelector('[data-arch-node="human"]')).toHaveAttribute("data-state", "active");
+    // checkpoints → approval → human: the packet only travels connectors
+    expect(diagram.querySelector('[data-arch-edge="checkpoint"]')).toHaveAttribute("data-state", "active");
+    expect(diagram.querySelector('[data-arch-edge="decision"]')).toHaveAttribute("data-state", "active");
+    expect(diagram.querySelector('[data-arch-node="retrieval"]')).toHaveAttribute("data-state", "dim");
+  });
+
+  it("the filter chips highlight one kind of component", async () => {
+    render(<ReviewPage />);
+    const diagram = screen.getByTestId("architecture-diagram");
+    await userEvent.click(within(diagram).getByRole("button", { name: "Language model" }));
+    expect(diagram.querySelector('[data-arch-node="llm"]')).toHaveAttribute("data-state", "active");
+    expect(diagram.querySelector('[data-arch-node="principal"]')).toHaveAttribute("data-state", "dim");
+    await userEvent.click(within(diagram).getByRole("button", { name: "Authority" }));
+    expect(diagram.querySelector('[data-arch-node="principal"]')).toHaveAttribute("data-state", "active");
+    expect(diagram.querySelector('[data-arch-node="approval"]')).toHaveAttribute("data-state", "active");
+  });
+
   it("walkthrough tabs switch flows and the HITL flow shows the write boundary", async () => {
     render(<ReviewPage />);
     const flows = screen.getByTestId("flow-walkthrough");

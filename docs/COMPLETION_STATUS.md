@@ -10,7 +10,7 @@ The portfolio demo is **deployed by the operator** (not by the assistant) and ex
 
 | Area | Verified live |
 | --- | --- |
-| Hosting | Vercel (frontend), Railway (FastAPI; pre-deploy migrations + checkpoint setup ready), Supabase PostgreSQL + pgvector |
+| Hosting | Vercel (frontend), Render free tier (FastAPI; sleeps when idle, the UI shows a wake-up notice; first deployed on Railway with pre-deploy migrations + checkpoint setup), Supabase PostgreSQL + pgvector |
 | Auth | Supabase sign-in → JWT → `/api/me` → tenant memberships; anonymous "Try Live Demo" sessions |
 | Public demo | read-only BluePeak tenant (no action tools) |
 | Live trace | SSE `POST /api/agent/messages/stream` through the hosted stack; running / completed / failed steps in the UI |
