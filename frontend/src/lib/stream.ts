@@ -15,6 +15,7 @@
  * - `aborted`     the caller aborted (new conversation, unmount)
  */
 import { API_URL } from "./api";
+import { reportBackendResponded, reportWakeSignal } from "./backendWake";
 import { createSseParser } from "./sse";
 import type { ApiError, RunEvent } from "./types";
 
@@ -101,7 +102,9 @@ export async function streamRun<T>(
     } catch {
       if (signal?.aborted) return { kind: "aborted" };
       // No response at all (same as the JSON client): reported as a normal failure. The
-      // caller offers only a MANUAL retry; decisions are idempotent server-side.
+      // caller offers only a MANUAL retry; decisions are idempotent server-side. The server
+      // may be asleep (Render free tier), so the wake-up check starts; this POST is not retried.
+      reportWakeSignal();
       return {
         kind: "failed",
         error: timedOut
@@ -110,6 +113,7 @@ export async function streamRun<T>(
       };
     }
 
+    reportBackendResponded();
     const type = res.headers.get("Content-Type") ?? "";
     if (!type.includes("text/event-stream")) {
       const data = (await res.json().catch(() => null)) as { error?: { code?: string; message?: string } } | null;

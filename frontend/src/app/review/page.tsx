@@ -264,7 +264,7 @@ export default function ReviewPage() {
         <Section
           id="deployment"
           title="Deployment topology"
-          lead="A push to main runs GitHub Actions CI while Railway and Vercel deploy through their native Git integrations."
+          lead="A push to main runs GitHub Actions CI while Render and Vercel deploy through their native Git integrations."
         >
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {DEPLOYMENT.map((d) => (

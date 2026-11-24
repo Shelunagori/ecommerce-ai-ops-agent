@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { decideAction, getHistory, sendMessage, streamAgentMessage, streamDecision } from "@/lib/agent";
+import { useBackendWake } from "@/lib/backendWake";
 import {
   activeStep,
   applyEvent,
@@ -126,6 +127,8 @@ export default function ChatPanel({
   const [traceOpen, setTraceOpen] = useState(true);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  // Render free tier: no sends while the API is starting (reads retry by themselves; writes never do).
+  const backendWaking = useBackendWake().status === "waking";
   const [error, setError] = useState<{ text: string; message: string } | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const itemsRef = useRef<Item[]>([]);
@@ -199,7 +202,7 @@ export default function ChatPanel({
   const submit = useCallback(
     async (text: string) => {
       const clean = text.trim();
-      if (!clean || busy) return;
+      if (!clean || busy || backendWaking) return;
       setError(null);
       setBusy(true);
       const id = localId();
@@ -256,7 +259,7 @@ export default function ChatPanel({
           return;
       }
     },
-    [busy, tenant.tenant_id, threadId, onEventFor, finishMessage, patch],
+    [busy, backendWaking, tenant.tenant_id, threadId, onEventFor, finishMessage, patch],
   );
 
   const decide = useCallback(
@@ -510,12 +513,12 @@ export default function ChatPanel({
                 void submit(draft);
               }
             }}
-            placeholder="Ask CommerceOps AI…"
+            placeholder={backendWaking ? "Backend is waking up… please wait" : "Ask CommerceOps AI…"}
             className="max-h-40 min-h-11 flex-1 resize-y rounded-xl border border-slate-300 px-3 py-2.5 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-200"
           />
           <button
             type="submit"
-            disabled={busy || !draft.trim()}
+            disabled={busy || backendWaking || !draft.trim()}
             className="h-11 rounded-xl bg-indigo-600 px-5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Send

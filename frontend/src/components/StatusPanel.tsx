@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { API_URL, getDatabaseHealth, getHealth } from "@/lib/api";
+import { retryWake, useBackendWake } from "@/lib/backendWake";
 
 type State = "checking" | "ok" | "down";
 type Check = { state: State; detail: string };
@@ -18,18 +19,40 @@ const BADGE: Record<State, string> = {
 const LABEL: Record<State, string> = { checking: "Checking", ok: "Online", down: "Offline" };
 
 function StatusRow({ name, check }: { name: string; check: Check }) {
+  // Render free tier: while a check waits on a sleeping API, say so instead of "Checking".
+  const wake = useBackendWake().status;
+  const waking = check.state === "checking" && wake === "waking";
+  const unreachable = check.state === "checking" && wake === "unreachable";
+  const detail = waking ? "Waking backend… please wait" : unreachable ? "Backend unreachable" : check.detail;
+  const badge = waking
+    ? "bg-orange-50 text-orange-700 ring-orange-200"
+    : unreachable
+      ? BADGE.down
+      : BADGE[check.state];
+  const label = waking ? "Waking" : unreachable ? "Unreachable" : LABEL[check.state];
   return (
     <li className="flex items-center justify-between gap-4 py-3">
       <div>
         <p className="font-medium text-slate-900">{name}</p>
-        <p className="text-sm text-slate-500">{check.detail}</p>
+        <p className="text-sm text-slate-500">{detail}</p>
       </div>
-      <span
-        className={`rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset ${BADGE[check.state]}`}
-        data-testid={`${name.toLowerCase()}-status`}
-      >
-        {LABEL[check.state]}
-      </span>
+      <div className="flex items-center gap-2">
+        {unreachable && (
+          <button
+            type="button"
+            onClick={retryWake}
+            className="rounded-md border border-rose-300 px-2 py-0.5 text-xs font-medium text-rose-700 hover:bg-rose-50"
+          >
+            Retry
+          </button>
+        )}
+        <span
+          className={`rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset ${badge}`}
+          data-testid={`${name.toLowerCase()}-status`}
+        >
+          {label}
+        </span>
+      </div>
     </li>
   );
 }
